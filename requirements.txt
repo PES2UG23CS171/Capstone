@@ -1,0 +1,18 @@
+# ── GUI & System Tray ────────────────────────────────────────────────────────
+PyQt6>=6.5
+pystray>=0.19
+
+# ── Audio I/O ────────────────────────────────────────────────────────────────
+sounddevice>=0.4
+numpy>=1.24
+
+# ── Icon generation (pystray needs a PIL Image) ─────────────────────────────
+Pillow>=10.0
+
+# ── Inference Engine (Phase 2) ───────────────────────────────────────────────
+# onnxruntime>=1.17          # uncomment when the ONNX model is ready
+
+# ── Dataset generation (existing) ───────────────────────────────────────────
+scipy
+soundfile
+# pyroomacoustics            # optional: synthetic RIR generation
