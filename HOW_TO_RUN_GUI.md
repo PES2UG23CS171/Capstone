@@ -32,7 +32,7 @@ python -m app.main
 
 ## 🎤 60-Second Demo Script
 
-You can use this script when presenting the GUI to Dr. Vaishali Shinde:
+You can use this script when presenting the GUI to Panel:
 
 1. *(Toggle the "Suppression: ON" button)* "We've integrated our proof-of-concept DSP filter directly into our Python GUI. As you can see by this live RTF number updating here, we are successfully processing audio at a fraction of the required real-time budget."
 2. *(Clap or speak loudly into the mic)* "If I make a loud sound into the microphone, you can hear it being instantly attenuated in the output, with zero perceptible delay."
