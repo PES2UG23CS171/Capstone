@@ -1,0 +1,7 @@
+# Requirements for Real-Time Transient Noise Suppression PoC
+# Install with: pip install -r requirements_poc.txt
+
+numpy>=1.24.0
+scipy>=1.11.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
