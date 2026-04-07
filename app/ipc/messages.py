@@ -73,6 +73,7 @@ class StatusPayload:
     output_level_db: float = -120.0
     xruns: int = 0                    # cumulative buffer over/under-runs
     cpu_percent: float = 0.0          # rough engine CPU usage
+    rtf: float = 0.0                  # real-time factor from RealTimeFilter
 
 
 @dataclass

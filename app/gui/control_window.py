@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -115,7 +116,8 @@ class ControlWindow(QMainWindow):
         root.setSpacing(12)
         root.setContentsMargins(16, 16, 16, 16)
 
-        # ── On/Off toggle ────────────────────────────────────────────────
+        # ── On/Off toggle + RTF label ─────────────────────────────────────
+        toggle_row = QHBoxLayout()
         self.btn_toggle = QPushButton("Suppression: ON")
         self.btn_toggle.setCheckable(True)
         self.btn_toggle.setChecked(True)
@@ -125,7 +127,17 @@ class ControlWindow(QMainWindow):
         font.setBold(True)
         self.btn_toggle.setFont(font)
         self._style_toggle(True)
-        root.addWidget(self.btn_toggle)
+        toggle_row.addWidget(self.btn_toggle)
+
+        self.lbl_rtf = QLabel("RTF: —")
+        rtf_font = QFont()
+        rtf_font.setPointSize(9)
+        self.lbl_rtf.setFont(rtf_font)
+        self.lbl_rtf.setStyleSheet("color: #22c55e; padding-left: 8px;")
+        self.lbl_rtf.setFixedWidth(180)
+        self.lbl_rtf.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        toggle_row.addWidget(self.lbl_rtf)
+        root.addLayout(toggle_row)
 
         # ── Strength slider ──────────────────────────────────────────────
         grp_strength = QGroupBox("Suppression Strength")
@@ -203,8 +215,25 @@ class ControlWindow(QMainWindow):
 
         root.addWidget(grp_meters)
 
+        # ── Proof of Concept button ──────────────────────────────────────
+        self.btn_poc = QPushButton("⚡  Proof of Concept")
+        self.btn_poc.setMinimumHeight(36)
+        poc_font = QFont()
+        poc_font.setPointSize(11)
+        poc_font.setBold(True)
+        self.btn_poc.setFont(poc_font)
+        self.btn_poc.setStyleSheet(
+            "QPushButton { background-color: #2563eb; color: white; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #3b82f6; }"
+        )
+        self.btn_poc.clicked.connect(self._open_waveform_viewer)
+        root.addWidget(self.btn_poc)
+
         # ── Status bar ──────────────────────────────────────────────────
         self.statusBar().showMessage("Engine starting…")
+
+        # ── Waveform viewer reference ────────────────────────────────────
+        self._waveform_viewer = None
 
     # ── Styling ──────────────────────────────────────────────────────────
 
@@ -277,6 +306,13 @@ class ControlWindow(QMainWindow):
         self.lbl_in_db.setText(_fmt(s.input_level_db))
         self.lbl_out_db.setText(_fmt(s.output_level_db))
 
+        # Update RTF label
+        if s.rtf > 0:
+            headroom = 1.0 / s.rtf if s.rtf > 0 else 9999
+            self.lbl_rtf.setText(f"RTF: {s.rtf:.4f}  ({headroom:.0f}× headroom)")
+        else:
+            self.lbl_rtf.setText("RTF: —")
+
         xr = f"  |  x-runs: {s.xruns}" if s.xruns else ""
         self.statusBar().showMessage(f"Engine running{xr}")
 
@@ -312,6 +348,20 @@ class ControlWindow(QMainWindow):
 
         self.combo_input.blockSignals(False)
         self.combo_output.blockSignals(False)
+
+    # ── Waveform viewer ───────────────────────────────────────────────────
+
+    def _open_waveform_viewer(self) -> None:
+        """Open the Proof of Concept waveform viewer window."""
+        from app.gui.waveform_viewer import WaveformViewer
+
+        if self._waveform_viewer is not None and self._waveform_viewer.isVisible():
+            self._waveform_viewer.raise_()
+            self._waveform_viewer.activateWindow()
+            return
+
+        self._waveform_viewer = WaveformViewer(parent=None)
+        self._waveform_viewer.show()
 
     # ── Window behaviour ─────────────────────────────────────────────────
 

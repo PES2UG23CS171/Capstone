@@ -6,6 +6,9 @@ pystray>=0.19
 sounddevice>=0.4
 numpy>=1.24
 
+# ── Waveform Plotting ────────────────────────────────────────────────────────
+pyqtgraph>=0.13
+
 # ── Icon generation (pystray needs a PIL Image) ─────────────────────────────
 Pillow>=10.0
 

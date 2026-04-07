@@ -25,9 +25,11 @@ from __future__ import annotations
 import logging
 import math
 import queue
+import sys
 import time
 import traceback
 from multiprocessing import Process, Queue
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -43,6 +45,17 @@ from app.ipc.messages import (
     EvtType,
     StatusPayload,
 )
+
+# Import RealTimeFilter from the PoC module at project root
+try:
+    # Ensure project root is on path so poc_realtime_transient can be imported
+    _project_root = str(Path(__file__).resolve().parent.parent.parent)
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+    from poc_realtime_transient import RealTimeFilter
+    _HAS_REALTIME_FILTER = True
+except ImportError:
+    _HAS_REALTIME_FILTER = False
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +104,20 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
 
     xruns: int = 0
     last_status_time: float = 0.0
+    current_rtf: float = 0.0
 
     # Peak levels (written by callback, read by status tick)
     peak_in: float = 0.0
     peak_out: float = 0.0
 
-    # ── Denoiser model ───────────────────────────────────────────────────
+    # ── Denoiser / RealTimeFilter ────────────────────────────────────────
+    rt_filter: Optional["RealTimeFilter"] = None
+    if _HAS_REALTIME_FILTER:
+        rt_filter = RealTimeFilter(sr=cfg.sample_rate, chunk=128)
+        log.info("RealTimeFilter loaded — transient suppression active.")
+    else:
+        log.warning("RealTimeFilter not available — falling back to StubDenoiser.")
+
     denoiser = StubDenoiser(
         model_path=cfg.model_path,
         sample_rate=cfg.sample_rate,
@@ -113,7 +134,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         time_info: sd.CallbackFlags,
         status: sd.CallbackFlags,
     ) -> None:
-        nonlocal peak_in, peak_out, xruns
+        nonlocal peak_in, peak_out, xruns, current_rtf
 
         if status:
             xruns += 1
@@ -122,7 +143,29 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         # Measure input level
         peak_in = float(np.max(np.abs(indata)))
 
-        if enabled:
+        if enabled and rt_filter is not None:
+            # Process through RealTimeFilter in 128-sample sub-chunks
+            mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+            n = len(mono)
+            chunk_size = 128
+            i = 0
+            while i + chunk_size <= n:
+                mono[i:i + chunk_size] = rt_filter.process_chunk(mono[i:i + chunk_size])
+                i += chunk_size
+            # Process remainder
+            if i < n:
+                tail = np.zeros(chunk_size, dtype=np.float32)
+                tail[:n - i] = mono[i:]
+                processed_tail = rt_filter.process_chunk(tail)
+                mono[i:] = processed_tail[:n - i]
+            processed = mono[:, np.newaxis] if indata.ndim > 1 else mono
+
+            # Update RTF from profiler
+            if rt_filter.profiler._times:
+                last_t = rt_filter.profiler._times[-1]
+                budget = chunk_size / cfg.sample_rate
+                current_rtf = last_t / budget
+        elif enabled:
             processed = denoiser.process(indata[:, :cfg.channels].copy())
         else:
             processed = indata[:, :cfg.channels].copy()
@@ -242,6 +285,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                         input_level_db=_db(peak_in),
                         output_level_db=_db(peak_out),
                         xruns=xruns,
+                        rtf=current_rtf,
                     ),
                 )
             )
