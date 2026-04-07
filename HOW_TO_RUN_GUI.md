@@ -4,7 +4,6 @@ Follow these instructions to run the updated application with the GUI and wavefo
 
 ## 1. Open your Terminal
 Make sure your terminal is opened inside the Capstone project folder:
-`C:\Users\dhrus\Desktop\Capstone`
 
 ## 2. Activate the Virtual Environment
 *(If it's not already activated from earlier)*
