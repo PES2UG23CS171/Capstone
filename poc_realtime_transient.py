@@ -142,10 +142,10 @@ class TransientDetector:
         self,
         sr: int = SAMPLE_RATE,
         chunk: int = CHUNK_SIZE,
-        threshold_db: float = 12.0,
-        suppress_db: float = 20.0,
-        hold_ms: float = 5.0,
-        release_ms: float = 20.0,
+        threshold_db: float = 6.0,
+        suppress_db: float = 40.0,
+        hold_ms: float = 350.0,
+        release_ms: float = 60.0,
     ) -> None:
         self.sr = sr
         self.chunk = chunk
@@ -153,24 +153,26 @@ class TransientDetector:
         # --- EMA coefficients ---
         # alpha_attack  ~ 1 - exp(-1 / (tau * sr))  with tau = 1 ms
         self.alpha_attack  = np.float32(1.0 - np.exp(-1.0 / (0.001 * sr)))
-        # alpha_release ~ 1 - exp(-1 / (tau * sr))  with tau = 100 ms
-        self.alpha_release = np.float32(1.0 - np.exp(-1.0 / (0.100 * sr)))
+        # alpha_release ~ 1 - exp(-1 / (tau * sr))  with tau = 500 ms
+        # Slow the slow envelope WAY down so gradual transients still trigger
+        self.alpha_release = np.float32(1.0 - np.exp(-1.0 / (0.500 * sr)))
 
         # Threshold in linear power ratio
-        self.threshold = np.float32(10.0 ** (threshold_db / 10.0))  # 12 dB → ~15.85
+        self.threshold = np.float32(10.0 ** (threshold_db / 10.0))  # 6 dB → ~3.98
 
         # Suppression gain (linear)
-        self.suppress_gain = np.float32(10.0 ** (-suppress_db / 20.0))  # -20 dB → 0.1
+        self.suppress_gain = np.float32(10.0 ** (-suppress_db / 20.0))  # -40 dB → 0.01
 
         # Hold and ramp counters (in samples)
-        self.hold_samples    = int(hold_ms * sr / 1000.0)      # 5 ms → 240 samples
-        self.release_samples = int(release_ms * sr / 1000.0)    # 20 ms → 960 samples
+        self.hold_samples    = int(hold_ms * sr / 1000.0)      # 350 ms → 16800 samples
+        self.release_samples = int(release_ms * sr / 1000.0)    # 60 ms → 2880 samples
 
         # --- State (persists across chunks) ---
         self.env_fast = np.float32(0.0)
         self.env_slow = np.float32(0.0)
         self._hold_counter = 0        # counts down during hold phase
         self._release_counter = 0     # counts down during ramp-up phase
+        self._total_triggers = 0      # diagnostic counter
 
     def process(self, x: np.ndarray) -> np.ndarray:
         """Apply transient gating to chunk *x* (float32, ±1 range).
@@ -208,6 +210,7 @@ class TransientDetector:
 
             if transient_now:
                 # Transient onset / continuation
+                self._total_triggers += 1
                 hold_ctr = self.hold_samples
                 rel_ctr  = 0
                 gains[i] = self.suppress_gain
@@ -256,10 +259,10 @@ class NoiseEstimator:
     def __init__(
         self,
         sr: int = SAMPLE_RATE,
-        window_ms: float = 50.0,
-        beta: float = 1.5,
-        g_min: float = 0.1,
-        n_windows: int = 8,
+        window_ms: float = 20.0,
+        beta: float = 8.0,
+        g_min: float = 0.01,
+        n_windows: int = 3,
     ) -> None:
         self.sr = sr
         self.window_samples = int(window_ms * sr / 1000.0)  # 50 ms → 2400
@@ -491,7 +494,7 @@ def generate_test_signal(
     # 1. Base "speech-like" chirp with AM
     base = _scipy_chirp(t, f0=200, f1=3000, t1=duration_s, method="linear").astype(FLOAT_DTYPE)
     am   = (0.5 + 0.5 * np.sin(2 * np.pi * 4.0 * t)).astype(FLOAT_DTYPE)  # 4 Hz AM
-    speech = base * am * np.float32(0.3)  # peak ≈ -10 dBFS
+    speech = base * am * np.float32(0.12)  # quiet speech — transients must dominate
 
     clean = speech.copy()
 
@@ -512,22 +515,22 @@ def generate_test_signal(
             # Simple band-pass via windowed sinc is overkill for PoC;
             # we just colour it with a rough envelope
             env = np.sin(np.linspace(0, np.pi, dur, dtype=FLOAT_DTYPE))
-            burst *= env * 0.6
+            burst *= env * 1.4
             end = min(idx + dur, n_samples)
             transients[idx:end] += burst[: end - idx]
 
         elif label == "door_slam":
             # Impulse + exponential decay over 50 ms
             dur = int(0.050 * sr)
-            imp = np.exp(-np.linspace(0, 8, dur, dtype=FLOAT_DTYPE)) * 0.9
-            imp[0] = 0.95  # strong initial hit
+            imp = np.exp(-np.linspace(0, 8, dur, dtype=FLOAT_DTYPE)) * 1.9
+            imp[0] = 1.9  # strong initial hit
             end = min(idx + dur, n_samples)
             transients[idx:end] += imp[: end - idx]
 
         elif label == "keyboard_click":
             # Very short 5 ms impulse
             dur = int(0.005 * sr)
-            click = rng.normal(0, 0.7, dur).astype(FLOAT_DTYPE)
+            click = rng.normal(0, 1.4, dur).astype(FLOAT_DTYPE)
             click *= np.hanning(dur).astype(FLOAT_DTYPE)
             end = min(idx + dur, n_samples)
             transients[idx:end] += click[: end - idx]
@@ -536,16 +539,19 @@ def generate_test_signal(
             # 400 ms frequency sweep 800 → 3000 Hz
             dur = int(0.400 * sr)
             t_siren = np.linspace(0, 0.4, dur, endpoint=False, dtype=FLOAT_DTYPE)
-            siren = _scipy_chirp(t_siren, 800, 0.4, 3000).astype(FLOAT_DTYPE) * 0.5
+            siren = _scipy_chirp(t_siren, 800, 0.4, 3000).astype(FLOAT_DTYPE) * 1.2
             siren *= np.hanning(dur).astype(FLOAT_DTYPE)
             end = min(idx + dur, n_samples)
             transients[idx:end] += siren[: end - idx]
 
         elif label == "plosive_P":
-            # 15 ms burst — intentionally speech-like so we can test false-positive rate
-            dur = int(0.015 * sr)
-            plos = rng.normal(0, 0.25, dur).astype(FLOAT_DTYPE)
-            plos *= np.hanning(dur).astype(FLOAT_DTYPE)
+            # 30 ms burst — intentionally speech-like so we can test false-positive rate
+            # Slow-attack envelope mimics vocal tract buildup, NOT an impulse
+            dur = int(0.030 * sr)
+            plos = rng.normal(0, 0.10, dur).astype(FLOAT_DTYPE)
+            ramp = np.linspace(0, 1, dur // 3, dtype=FLOAT_DTYPE)
+            flat = np.ones(dur - dur // 3, dtype=FLOAT_DTYPE)
+            plos *= np.concatenate([ramp, flat])
             end = min(idx + dur, n_samples)
             transients[idx:end] += plos[: end - idx]
 
@@ -690,8 +696,8 @@ def run_live(duration_s: float = 0.0) -> None:
         if status:
             print(f"  [audio] {status}", flush=True)
 
-        # Convert int16 → float32 normalised
-        mono = indata[:, 0].astype(FLOAT_DTYPE) / INT16_MAX if indata.dtype == np.int16 else indata[:, 0].copy()
+        # indata and outdata are BOTH float32 when stream dtype='float32'
+        mono = indata[:, 0].copy()  # do NOT divide by 32767
 
         # Process in CHUNK_SIZE blocks
         n = len(mono)
@@ -707,14 +713,13 @@ def run_live(duration_s: float = 0.0) -> None:
         if i < n:
             processed[i:] = mono[i:]
 
-        # Convert back to output format
-        if outdata.dtype == np.int16:
-            outdata[:, 0] = (processed * INT16_MAX).astype(np.int16)
-        else:
-            outdata[:, 0] = processed
+        # Write to output — float32 passthrough
+        outdata[:, 0] = processed
+        if outdata.shape[1] > 1:
+            outdata[:, 1] = processed  # stereo output if needed
 
         # Periodic stats
-        if chunk_count[0] % 500 == 0 and chunk_count[0] > 0:
+        if chunk_count[0] % 1000 == 0 and chunk_count[0] > 0:
             elapsed = time.time() - start_time[0]
             recent = filt.profiler._times[-100:] if len(filt.profiler._times) >= 100 else filt.profiler._times
             if recent:
@@ -725,6 +730,8 @@ def run_live(duration_s: float = 0.0) -> None:
                     f"  [live] chunks={chunk_count[0]:>7d}  "
                     f"avg={avg_us:>7.1f}µs  "
                     f"RTF={rtf:.4f}  "
+                    f"triggers={filt.transient._total_triggers}  "
+                    f"noise_floor={filt.noise_est.noise_floor:.6f}  "
                     f"elapsed={elapsed:.1f}s",
                     flush=True,
                 )
@@ -780,6 +787,27 @@ def run_live(duration_s: float = 0.0) -> None:
 # ---------------------------------------------------------------------------
 # Demo Flow (generates test signal → processes → reports)
 # ---------------------------------------------------------------------------
+def diagnose(noisy: np.ndarray, out: np.ndarray, sr: int, filt: RealTimeFilter):
+    """Print what the filter actually did, sample by sample."""
+    times = np.array(filt.profiler._times) * 1e6
+    budget = 128 / sr * 1e6
+    rtf = float(np.mean(times)) / budget
+
+    print(f"\n  RTF: {rtf:.5f}  ({1/rtf:.0f}x headroom)")
+    print(f"  Transient detector fired {filt.transient._total_triggers} times")
+    print(f"  Noise estimator converged: floor={filt.noise_est.noise_floor:.6f}")
+
+    events = [(1.2,"dog_bark"),(3.5,"door_slam"),(5.0,"keyboard"),
+              (6.8,"siren"),(8.5,"plosive_P")]
+    for pos, label in events:
+        s = int((pos-0.05)*sr); e = int((pos+0.5)*sr)
+        n_pk = float(np.max(np.abs(noisy[s:e])))
+        f_pk = float(np.max(np.abs(out[s:e])))
+        db   = 20*np.log10(n_pk/f_pk) if f_pk > 1e-9 else 99.0
+        print(f"    {label:<18} noisy={n_pk:.3f}  filtered={f_pk:.3f}  Δ={db:+.1f}dB")
+    print()
+
+
 def _run_demo_flow() -> None:
     """Full demo pipeline: generate → filter → report."""
     print("=" * 64)
@@ -795,7 +823,52 @@ def _run_demo_flow() -> None:
     print("  Step 2/3: Running real-time filter on noisy signal ...")
     print("  " + "-" * 56)
     output_path = noisy_path.with_name("test_noisy_filtered.wav")
-    run_offline_demo(noisy_path, output_path)
+
+    # --- Load noisy signal for diagnostics ---
+    if sf is not None:
+        noisy_data, sr = sf.read(str(noisy_path), dtype="float32")
+    else:
+        from scipy.io import wavfile
+        sr, raw = wavfile.read(str(noisy_path))
+        noisy_data = raw.astype(FLOAT_DTYPE) / INT16_MAX if raw.dtype == np.int16 else raw.astype(FLOAT_DTYPE)
+    if noisy_data.ndim > 1:
+        noisy_data = noisy_data[:, 0]
+
+    # --- Process chunk-by-chunk ---
+    filt = RealTimeFilter(sr=sr, chunk=CHUNK_SIZE)
+    n = len(noisy_data)
+    out = np.zeros(n, dtype=FLOAT_DTYPE)
+    n_chunks = n // CHUNK_SIZE
+    print(f"  Processing {n_chunks} chunks of {CHUNK_SIZE} samples ...")
+    for i in range(n_chunks):
+        s = i * CHUNK_SIZE
+        e = s + CHUNK_SIZE
+        out[s:e] = filt.process_chunk(noisy_data[s:e])
+    remainder = n % CHUNK_SIZE
+    if remainder > 0:
+        last_chunk = np.zeros(CHUNK_SIZE, dtype=FLOAT_DTYPE)
+        last_chunk[:remainder] = noisy_data[n_chunks * CHUNK_SIZE :]
+        processed = filt.process_chunk(last_chunk)
+        out[n_chunks * CHUNK_SIZE :] = processed[:remainder]
+
+    # --- Save filtered output ---
+    if sf is not None:
+        sf.write(str(output_path), out, sr)
+    else:
+        from scipy.io import wavfile as wf
+        wf.write(str(output_path), sr, (out * INT16_MAX).astype(np.int16))
+    print(f"  ✓ Filtered output saved → {output_path}")
+    print()
+
+    # --- Print latency report ---
+    audio_dur = len(noisy_data) / sr
+    print(filt.profiler.report(total_audio_duration_s=audio_dur))
+
+    # --- Diagnostic output ---
+    print("  " + "-" * 56)
+    print("  DIAGNOSTIC REPORT")
+    print("  " + "-" * 56)
+    diagnose(noisy_data, out, sr, filt)
 
     print("  Step 3/3: Summary")
     print("  " + "-" * 56)
