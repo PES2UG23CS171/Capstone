@@ -27,6 +27,7 @@ class CmdType(Enum):
     SET_GAIN = auto()             # float  dB
     SET_INPUT_DEVICE = auto()     # Optional[int]
     SET_OUTPUT_DEVICE = auto()    # Optional[int]
+    SET_PASSTHROUGH = auto()      # bool — direct mic→headphones bypass
     GET_DEVICES = auto()          # request device list
     SHUTDOWN = auto()             # graceful stop
 
