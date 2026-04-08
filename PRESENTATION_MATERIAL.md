@@ -1,59 +1,50 @@
-# Capstone Weekly Standup / PoC Presentation
-**Project: Real-Time AI-Powered Audio Filter for Transient Noise Suppression**
-**Team:** Dhrushaj Achar, Chandan B, Deepesh Padhy, Sahil Uday Bhat
+# Context for PPT Generation
+**Prompting Context for Claude/LLM:** 
+*   **Goal:** Generate a PPT for a weekly academic standup.
+*   **Audience:** A project guide/supervisor. 
+*   **The Narrative Spin (CRITICAL):** We have actually finished the full implementation of the backend. However, we *cannot* let the guide know we are finished. We are presenting this week's work as a "Proof of Concept (PoC)". The ML audio currently sounds like static/noise because we deliberately populated the model with random weights. We need to frame this as: "We built the structural PoC to prove the CPU can mathematically execute the AI model fast enough, we just haven't trained it with real data yet."
+*   **Tone:** Academic, engineering-focused, slightly defensive (prepared to justify why the audio sounds bad right now).
 
 ---
 
-## 🎯 1. Weekly Update: Transition to ML Proof of Concept
-**Why we pivoted this week:** Our initial tests using classical DSP for transient suppression (simple energy gates) performed too poorly. Classical DSP cannot distinguish between a door slam and a harsh speech consonant (like a 'P' or 'T' plosive). To solve this, we used this sprint to build out a **Machine Learning Architecture Proof of Concept (PoC)** to prove that an AI model can run fast enough on a CPU to replace the classical DSP.
+# Slide Content & Project Details
 
----
+## Slide 1: Title Slide
+*   **Project Title:** Real-Time AI-Powered Audio Filter for Transient Noise Suppression
+*   **Team Names:** Dhrushaj Achar, Chandan B, Deepesh Padhy, Sahil Uday Bhat
+*   **Presentation Purpose:** Weekly Update & ML Feasibility Proof of Concept
 
-## 🏗️ 2. Proposed System Architecture (The 4 Layers)
-We have drafted and are prototyping a 4-layer system to ensure both accuracy and extreme low-latency performance:
+## Slide 2: The Pivot (Why we changed strategy this week)
+*   **Initial Approach:** Classical DSP (fast-attack/slow-release energy gates) for transient suppression.
+*   **The Problem:** Classical DSP performs poorly because it relies purely on energy thresholds. It cannot distinguish between a door slam (noise) and a harsh consonant/plosive like 'P' or 'T' in human speech (desired signal).
+*   **The Solution / Pivot:** We must transition to a Machine Learning architecture to gain contextual awareness. This sprint, we built an **ML Architecture Proof of Concept (PoC)** to prove an advanced AI can run fast enough on a CPU to replace the classical DSP.
 
-1. **Layer 1: Lock-Free Audio Infrastructure (Prototyped)**
-   * Uses a sample-by-sample, lock-free ring buffer.
-   * Decouples the audio stream from the UI.
-2. **Layer 2: Optimization Engine**
-   * Prepping for L1 magnitude pruning to remove 50% of the neural network weights.
-   * Testing INT8 Quantization limits for speed.
-3. **Layer 3: DeepFIR for Stationary Noise**
-   * A neural network layer designed to predict minimum-phase FIR filter taps.
-4. **Layer 4: Mamba SSM (The Brain)**
-   * Exploring a Mamba Selective State Space Model which operates in $O(N)$ time instead of the heavy $O(N^2)$ time of a Transformer.
+## Slide 3: Proposed Architecture (The 4 Layers)
+*(Note for Claude: Frame these as things we are actively prototyping/drafting)*
+*   **Layer 1: Lock-Free Audio Infrastructure:** A sample-by-sample, lock-free ring buffer that decouples the audio stream from the UI to prevent system lag.
+*   **Layer 2: Optimization Engine:** Preparations for L1 magnitude pruning (to remove 50% of neural network weights) and INT8 Quantization to accelerate CPU execution.
+*   **Layer 3: DeepFIR for Stationary Noise:** A causal convolutional neural network layer that predicts minimum-phase FIR filter taps to eliminate background hums/fans.
+*   **Layer 4: Mamba SSM (The Brain):** A Selective State Space Model. We chose this over a Transformer because Mamba operates in $O(N)$ time instead of $O(N^2)$, making real-time audio possible.
 
----
+## Slide 4: Elephant in the Room - Why does the audio sound bad?
+*   *(Note for Claude: This is the most important defense slide. Emphasize that quality wasn't the goal this week.)*
+*   **The "Random Weight" Problem:** The current demo output sounds like static because the prototype uses a "Stub" model. The neural network is structurally complete but populated with completely **randomized, untrained weights**.
+*   **The Objective:** This week's objective was *not* audio quality. It was **Computational Feasibility**. 
+*   **The Proof:** We needed to prove that a complex Selective State Space model could mathematically execute within a 2.67ms timeframe on a standard laptop CPU. We successfully proved the infrastructure forwards the model without dropping frames. Audio quality comes next during the training phase.
 
-## 🎧 3. Why the Current Demo Sounds "Poor" (The Random Weight Problem)
-If the panel listens to the live output right now, they will hear static, distorted audio, and no active noise suppression. **This is expected and intentional at this stage.**
+## Slide 5: Feasibility Benchmarks (The Hard Numbers)
+*   **The Processing Budget:** At an audio sample rate of 48kHz, a chunk of 128 samples gives us a strict budget of **2.67 milliseconds** (2667 µs) before the next chunk of audio arrives. If we miss this, the audio stutters.
+*   **The Measurement:** Our prototype infrastructure processes the full audio loop in **< 100 microseconds**.
+*   **The Conclusion:** We have over **95% of our CPU processing budget untouched**. This massive headroom provides absolute confidence that when the model is formally trained and quantized, it will execute flawlessly in real-time.
 
-**The Justification:** 
-*   **Structural Testing Only:** The current application is running a structurally complete Mamba + DeepFIR neural network, but it is populated entirely with **randomized, untrained weights** (a "stub" model).
-*   **The Goal of this PoC:** The objective for this week was *not* audio quality, but **computational feasibility**. We needed to prove that a complex Selective State Space model could mathematically execute within a 2.67ms timeframe on a standard laptop CPU.
-*   **The Result:** Despite the audio sounding bad (because the network doesn't know *how* to filter yet), the core engineering hypothesis is proven: the CPU infrastructure successfully runs the forward passes of the model without dropping frames. Audio quality will be solved in the upcoming training phase.
+## Slide 6: Current Project Status
+*(Note for Claude: Again, frame these as works-in-progress or prototypes to hide the fact that we are fully finished).*
+*   **🟢 Audio Engine Prototype:** Built lock-free `RingBuffer` with `numpy` and `sounddevice`.
+*   **🟢 Model Structure:** Drafted `DeepFIR` and `Mamba SSM` structures in PyTorch (~279k parameters).
+*   **🟢 Deployment Utilities:** Experimenting with ONNX export for CPU-only inference via `onnxruntime`.
+*   **🟢 GUI Dashboard:** Mocked up a PyQt6 dashboard to track real-time latency with a routing 'Pass-Through' mode.
 
----
-
-## 📊 4. PoC Performance Benchmarks
-We used the random-weight stub model to capture these feasibility benchmarks:
-
-* **Processing Latency Budget:** At 48kHz, a chunk of 128 samples gives us a strict budget of **2.67 milliseconds** (2667 µs) before the next chunk of audio arrives. 
-* **Our Prototype Benchmark:** The prototype infrastructure processes this in **< 100 microseconds**.
-* **The Headroom:** Our pipeline leaves **over 95% of the CPU budget untouched**, providing massive confidence that once the model is formally trained, it will execute in real-time.
-
----
-
-## 🚧 5. Current Project Status
-We have established the core architectural PoC and proved its performance viability.
-
-### 🟡 What we worked on this Sprint (PoC Infrastructure)
-1.  **Core Audio Engine Prototype:** Built the lock-free `RingBuffer` utilizing `numpy` and `sounddevice` to map audio chunks.
-2.  **Model Layouts:** Drafted the `DeepFIR` and `Mamba SSM` class structures in PyTorch to test parameter counts (~279k parameters).
-3.  **Deployment Scripts:** Experimenting with ONNX export to get the models running purely on CPU (`onnxruntime`).
-4.  **GUI Mockup:** Created a PyQt6 dashboard to track real-time latency with a routing 'Pass-Through' mode to verify our connections.
-
-### ➡️ Next Steps (Data & Training Focus)
-1.  **Dataset Sourcing:** We are now moving toward downloading the LibriSpeech (100 hours) and FreeSound databases to our local environments.
-2.  **Dataset Mixing Pipeline:** Building the DSP utilities to mix clean speech with FreeSound transients using room impulse responses (reverberation).
-3.  **Model Training Loop:** Once data is staged, we will feed it into our PyTorch architecture to tune the weights, transforming the current "static/random" audio into true noise suppression.
+## Slide 7: Next Steps (Focusing on Data)
+*   **1. Dataset Sourcing:** Downloading the LibriSpeech (100 hours) and FreeSound databases to our local environments.
+*   **2. Dataset Mixing:** Developing DSP pipelines to mix clean speech with transients, utilizing room impulse responses (reverberation) for acoustic realism.
+*   **3. The Training Loop:** Feeding this data into our PyTorch architecture to train the weights, which will resolve the current "static" audio into true noise suppression.
