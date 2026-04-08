@@ -47,18 +47,17 @@ def main() -> None:
     # A standard venv python executable on macOS lacks the Bundle ID context 
     # required by AppKit/Cocoa, which causes PyQt6 to fatally crash the app.
     # We intercept this instantly and transparently re-launch the process 
-    # using the true framework base-executable while injecting the venv packages.
+    # using the true framework base-executable. We deliberately DO NOT inject
+    # the venv's site-packages via PYTHONPATH, as PyQt6 loaded from a venv
+    # triggers a known "cocoa" plugin ABI mismatch when run by a system binary.
+    # The system Python 3.12 already contains all required global dependencies.
     import sys
     import os
     if sys.platform == "darwin" and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable:
-        venv_site_packages = [p for p in sys.path if "site-packages" in p]
-        if venv_site_packages:
-            import os
-            # Prepend current working directory so the 'app' module can still be found
-            paths = [os.getcwd()] + venv_site_packages
-            os.environ["PYTHONPATH"] = ":".join(paths)
-            os.execl(sys._base_executable, sys._base_executable, *sys.argv)
-
+        current_pythonpath = os.environ.get("PYTHONPATH", "")
+        if os.getcwd() not in current_pythonpath.split(":"):
+            os.environ["PYTHONPATH"] = f"{os.getcwd()}:{current_pythonpath}".strip(":")
+        os.execl(sys._base_executable, sys._base_executable, *sys.argv)
     # ── Logging ──────────────────────────────────────────────────────────
     logging.basicConfig(
         level=logging.INFO,
