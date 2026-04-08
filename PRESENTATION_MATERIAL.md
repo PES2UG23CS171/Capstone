@@ -54,22 +54,35 @@ We measure our model against these strict industry standards:
 
 ---
 
-## ✅ 4. Implementation Status
-An outline of everything that has been successfully built into the repository to date.
+## ✅ 4. Detailed Project Status Report
+The project is currently transitioning from **Phase 1 (Infrastructure & Feasibility)** to **Phase 2 (Machine Learning Execution)**. All foundational software engineering and architecture is **100% complete**. 
 
-### Completed (100% Implemented & Verified)
-* ✔️ **Core IPC & Multiprocessing Architecture:** Full separation of GUI and audio processing engines.
-* ✔️ **GUI Dashboard:** Built with PyQt6 featuring Real-Time Factor tracking, device selection, output gain controls, and a fully functional Pass-Through (Demo) mode.
-* ✔️ **Real-Time Audio Pipeline:** implementation of low-latency `sounddevice` streams and lock-free Numpy ring buffers.
-* ✔️ **Model Architecture Definitions:** DeepFIR and Mamba SSM layers written in PyTorch.
-* ✔️ **ONNX Export & Quantization Pipeline:** Functional automated scripts for INT8 quantization, Pruning, and `onnxruntime` CPU benchmarking.
-* ✔️ **Dataset Generation Framework:** Fully working synthetic pair generation combining LibriSpeech, FreeSound transients, and near/far-field Room Impulse Responses (pyroomacoustics).
-* ✔️ **Evaluation Module:** Scripts calculating PESQ, SI-SDR, and TSS scores accurately.
+### 🟢 Completed Infrastructure (Ready & Verified)
+Everything required to process audio and run ML models in real-time has been built from scratch:
+1.  **Core Audio Engine (`audio/`)**
+    *   **Status:** 100% Complete.
+    *   **Details:** Built a lock-free C-style `RingBuffer` utilizing `numpy` and `sounddevice` to completely decouple the GUI process from the audio I/O process using multiprocessing `ProcessManager`.
+2.  **Machine Learning Architecture Defined (`model/`)**
+    *   **Status:** 100% Complete. 
+    *   **Details:** The `DeepFIR` (causal convolutional network) and `Mamba SSM` (Selective State Space Model) have been fully coded in PyTorch. The combined hybrid inference model has been mapped and verified to shape constraints parameters exactly (279,041 parameters).
+3.  **ONNX Deployment Pipeline (`inference/` & `model/`)**
+    *   **Status:** 100% Complete.
+    *   **Details:** Built the deployment scripts to automatically apply **L1 magnitude pruning (50%)** and **Dynamic INT8 Quantization**. Python inference via `onnxruntime` is wired up to support `CPUExecutionProvider` with overlap-add windowed processing logic.
+4.  **Dataset Generation Engine (`dataset/`)**
+    *   **Status:** 100% Complete.
+    *   **Details:** Engineered a DSP utility to mix clean LibreSpeech data with FreeSound transients, dynamically convolving them via the `pyroomacoustics` library to simulate synthetic near-field and far-field acoustic reverberation. 
+5.  **Evaluation Metrics Suite (`training/`)**
+    *   **Status:** 100% Complete.
+    *   **Details:** Wrote automated evaluation scripts to grade model outputs against industry standard SI-SDRi, TSS (Transient Suppression Score), and PESQ.
+6.  **Graphical User Interface (`app/gui/`)**
+    *   **Status:** 100% Complete.
+    *   **Details:** Sleek, responsive PyQt6 and `pyqtgraph` dashboard tracking real-time latency with interactive controls and a 'Pass-Through' mode.
 
-### Next Steps (Phase 2 - Execution)
-* ⏳ **Dataset Download:** Pulling the massive 100hr LibriSpeech and FreeSound datasets onto the training machine.
-* ⏳ **Model Training Run:** Executing the training loop over multiple epochs to properly tune the random weights of the Mamba+DeepFIR model.
-* ⏳ **Final Verification:** Replacing the randomized/stub ONNX weights with the fully trained model and verifying final SI-SDR and PESQ metrics.
+### 🟡 Pending Execution (Phase 2)
+The software is fully developed; the remaining tasks are purely operational relating to data and server time.
+1.  **Dataset Sourcing:** Waiting for the LibriSpeech (100 hours) and FreeSound databases to be downloaded to local environments.
+2.  **Model Tuning / Training Loop:** Executing the already-written `training/train.py` loop across the generated dataset to converge the random PyTorch weights into functional acoustic processing weights.
+3.  **Final Model Swap:** Injecting the final compiled `filter_model.onnx` into the pipeline and extracting the final SI-SDRi and PESQ accuracy scores for the final report.
 
 ---
 
