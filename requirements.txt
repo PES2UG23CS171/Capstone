@@ -12,10 +12,21 @@ pyqtgraph>=0.13
 # ── Icon generation (pystray needs a PIL Image) ─────────────────────────────
 Pillow>=10.0
 
-# ── Inference Engine (Phase 2) ───────────────────────────────────────────────
-# onnxruntime>=1.17          # uncomment when the ONNX model is ready
+# ── Deep Learning ────────────────────────────────────────────────────────────
+torch>=2.2.0
+torchaudio>=2.2.0
 
-# ── Dataset generation (existing) ───────────────────────────────────────────
+# ── Inference Engine ─────────────────────────────────────────────────────────
+onnx>=1.16.0
+onnxruntime>=1.18.0
+
+# ── Audio Processing ────────────────────────────────────────────────────────
 scipy
 soundfile
-# pyroomacoustics            # optional: synthetic RIR generation
+librosa>=0.10.0
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+pesq>=0.0.4
+
+# ── Training ────────────────────────────────────────────────────────────────
+tqdm>=4.66.0

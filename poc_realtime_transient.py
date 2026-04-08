@@ -432,9 +432,10 @@ class RealTimeFilter:
     the chunk budget (~2667 µs at 128 samples / 48 kHz).
     """
 
-    def __init__(self, sr: int = SAMPLE_RATE, chunk: int = CHUNK_SIZE) -> None:
+    def __init__(self, sr: int = SAMPLE_RATE, chunk: int = CHUNK_SIZE, use_noise_est: bool = True) -> None:
         self.sr = sr
         self.chunk = chunk
+        self.use_noise_est = use_noise_est
         self.transient = TransientDetector(sr=sr, chunk=chunk)
         self.noise_est = NoiseEstimator(sr=sr)
         self.profiler  = LatencyProfiler(sr=sr, chunk=chunk)
@@ -449,8 +450,9 @@ class RealTimeFilter:
         # 1. Transient detection & suppression
         out = self.transient.process(chunk)
 
-        # 2. Stationary noise floor suppression
-        out = self.noise_est.process(out)
+        # 2. Stationary noise floor suppression (skip in live mode)
+        if self.use_noise_est:
+            out = self.noise_est.process(out)
 
         elapsed = time.perf_counter() - t0
         self.profiler.record(elapsed)
