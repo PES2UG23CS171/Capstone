@@ -43,6 +43,22 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    # ── macOS: Virtual environment GUI fix ───────────────────────────────
+    # A standard venv python executable on macOS lacks the Bundle ID context 
+    # required by AppKit/Cocoa, which causes PyQt6 to fatally crash the app.
+    # We intercept this instantly and transparently re-launch the process 
+    # using the true framework base-executable while injecting the venv packages.
+    import sys
+    import os
+    if sys.platform == "darwin" and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable:
+        venv_site_packages = [p for p in sys.path if "site-packages" in p]
+        if venv_site_packages:
+            import os
+            # Prepend current working directory so the 'app' module can still be found
+            paths = [os.getcwd()] + venv_site_packages
+            os.environ["PYTHONPATH"] = ":".join(paths)
+            os.execl(sys._base_executable, sys._base_executable, *sys.argv)
+
     # ── Logging ──────────────────────────────────────────────────────────
     logging.basicConfig(
         level=logging.INFO,
@@ -55,14 +71,18 @@ def main() -> None:
     # ── Configuration ────────────────────────────────────────────────────
     cfg = AppConfig()
 
-    # ── Audio engine (child process) ─────────────────────────────────────
-    engine = AudioEngineHandle(cfg)
-    engine.start()
-
     # ── Qt application ───────────────────────────────────────────────────
+    # IMPORTANT: On macOS, QApplication must be created BEFORE any child
+    # processes are spawned.  QApplication initialises AppKit/Cocoa on the
+    # main thread — if something else touches Cocoa first, the platform
+    # plugin fails to load ("Could not find the Qt platform plugin cocoa").
     app = QApplication(sys.argv)
     app.setApplicationName("TransientFilter")
     app.setQuitOnLastWindowClosed(False)   # keep alive when window is hidden
+
+    # ── Audio engine (child process) — start AFTER Qt init ───────────────
+    engine = AudioEngineHandle(cfg)
+    engine.start()
 
     # ── Control window ───────────────────────────────────────────────────
     window = ControlWindow(engine)

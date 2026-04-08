@@ -456,14 +456,24 @@ class WaveformViewer(QMainWindow):
         # ── Plot waveforms ───────────────────────────────────────────
         if self._plot_clean is not None:
 
-            # Downsample for plotting performance (show every Nth sample)
-            n = len(clean)
-            step = max(1, n // 20000)
-            t = np.arange(0, n, step) / sr
+            # Clear previous plots
+            self._plot_clean.clear()
+            self._plot_noisy.clear()
+            self._plot_filtered.clear()
 
-            self._plot_clean.plot(t, clean[::step], pen=pg.mkPen("#888888", width=1))
-            self._plot_noisy.plot(t, noisy[::step], pen=pg.mkPen("#E05555", width=1))
-            self._plot_filtered.plot(t, filtered[::step], pen=pg.mkPen("#55BB55", width=1))
+            # Downsample for plotting performance (show every Nth sample)
+            step = max(1, len(clean) // 20000)
+            
+            c_sub = clean[::step]
+            n_sub = noisy[::step]
+            f_sub = filtered[::step]
+            
+            t = np.arange(len(c_sub)) * step / sr
+
+            # Strictly match lengths in case datasets differ by 1 due to slicing rounding
+            self._plot_clean.plot(t, c_sub, pen=pg.mkPen("#888888", width=1))
+            self._plot_noisy.plot(t[:len(n_sub)], n_sub, pen=pg.mkPen("#E05555", width=1))
+            self._plot_filtered.plot(t[:len(f_sub)], f_sub, pen=pg.mkPen("#55BB55", width=1))
 
             # ── Add transient markers ────────────────────────────────
             markers = [
