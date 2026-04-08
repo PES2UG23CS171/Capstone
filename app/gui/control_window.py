@@ -139,6 +139,23 @@ class ControlWindow(QMainWindow):
         toggle_row.addWidget(self.lbl_rtf)
         root.addLayout(toggle_row)
 
+        # ── Passthrough toggle (Demo mode) ───────────────────────────────
+        self.btn_passthrough = QPushButton("🔊  Pass-Through (Demo)")
+        self.btn_passthrough.setCheckable(True)
+        self.btn_passthrough.setChecked(False)
+        self.btn_passthrough.setMinimumHeight(36)
+        pt_font = QFont()
+        pt_font.setPointSize(11)
+        pt_font.setBold(True)
+        self.btn_passthrough.setFont(pt_font)
+        self.btn_passthrough.setStyleSheet(
+            "QPushButton { background-color: #333; color: #aaa; border-radius: 6px; }"
+            "QPushButton:checked { background-color: #2563eb; color: white; }"
+            "QPushButton:hover { background-color: #444; }"
+            "QPushButton:checked:hover { background-color: #3b82f6; }"
+        )
+        root.addWidget(self.btn_passthrough)
+
         # ── Strength slider ──────────────────────────────────────────────
         grp_strength = QGroupBox("Suppression Strength")
         lay_strength = QHBoxLayout(grp_strength)
@@ -251,6 +268,7 @@ class ControlWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.btn_toggle.toggled.connect(self._on_toggle)
+        self.btn_passthrough.toggled.connect(self._on_passthrough)
         self.slider_strength.valueChanged.connect(self._on_strength)
         self.slider_gain.valueChanged.connect(self._on_gain)
         self.combo_input.currentIndexChanged.connect(self._on_input_device)
@@ -262,6 +280,16 @@ class ControlWindow(QMainWindow):
         self.btn_toggle.setText(f"Suppression: {'ON' if checked else 'OFF'}")
         self._style_toggle(checked)
         self._engine.send(Command(CmdType.SET_ENABLED, checked))
+
+    def _on_passthrough(self, checked: bool) -> None:
+        self._engine.send(Command(CmdType.SET_PASSTHROUGH, checked))
+        self.btn_passthrough.setText(
+            "🔊  Pass-Through ACTIVE" if checked else "🔊  Pass-Through (Demo)"
+        )
+        # Grey out suppression controls in passthrough mode
+        self.slider_strength.setEnabled(not checked)
+        self.btn_toggle.setEnabled(not checked)
+        self.slider_gain.setEnabled(not checked)
 
     def _on_strength(self, value: int) -> None:
         pct = value / 100.0

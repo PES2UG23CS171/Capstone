@@ -98,6 +98,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     strength: float = cfg.suppression_strength
     gain_db: float = cfg.output_gain_db
     gain_lin: float = 10.0 ** (gain_db / 20.0)
+    passthrough: bool = False       # direct mic→headphones with zero processing
 
     input_dev: Optional[int] = cfg.input_device
     output_dev: Optional[int] = cfg.output_device
@@ -113,8 +114,19 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     # ── Denoiser / RealTimeFilter ────────────────────────────────────────
     rt_filter: Optional["RealTimeFilter"] = None
     if _HAS_REALTIME_FILTER:
-        rt_filter = RealTimeFilter(sr=cfg.sample_rate, chunk=128)
-        log.info("RealTimeFilter loaded — transient suppression active.")
+        rt_filter = RealTimeFilter(sr=cfg.sample_rate, chunk=128, use_noise_est=True)
+        # Retune transient detector for live mic (defaults are for offline demo)
+        td = rt_filter.transient
+        td.threshold = np.float32(10.0 ** (20.0 / 10.0))       # 20 dB — only real impulses
+        td.suppress_gain = np.float32(10.0 ** (-15.0 / 20.0))  # -15 dB — gentle attenuation
+        td.hold_samples = int(25.0 * cfg.sample_rate / 1000.0)  # 25 ms hold
+        td.release_samples = int(30.0 * cfg.sample_rate / 1000.0)  # 30 ms ramp-up
+        td.alpha_release = np.float32(1.0 - np.exp(-1.0 / (0.050 * cfg.sample_rate)))  # faster slow env
+        # Retune noise estimator — gentle (max -8 dB cut, preserves voice)
+        ne = rt_filter.noise_est
+        ne.beta = np.float32(1.5)    # gentle subtraction (was 8.0)
+        ne.g_min = np.float32(0.4)   # never cut more than -8 dB (was 0.01 = -40 dB)
+        log.info("RealTimeFilter loaded — transient suppression active (live-tuned).")
     else:
         log.warning("RealTimeFilter not available — falling back to StubDenoiser.")
 
@@ -142,6 +154,17 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
 
         # Measure input level
         peak_in = float(np.max(np.abs(indata)))
+
+        # Direct passthrough: zero processing for minimum latency
+        if passthrough:
+            out_ch = outdata.shape[1]
+            if indata.shape[1] < out_ch:
+                outdata[:] = np.tile(indata, (1, out_ch))[:, :out_ch]
+            else:
+                outdata[:] = indata[:, :out_ch]
+            peak_out = peak_in
+            current_rtf = 0.0
+            return
 
         if enabled and rt_filter is not None:
             # Process through RealTimeFilter in 128-sample sub-chunks
@@ -200,7 +223,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             channels=cfg.channels,
             dtype=cfg.dtype,
             callback=_audio_callback,
-            latency="low",
+            latency="high",
         )
         s.start()
         log.info(
@@ -263,6 +286,10 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                         stream.stop()
                         stream.close()
                     stream = _open_stream()
+
+                elif cmd.kind == CmdType.SET_PASSTHROUGH:
+                    passthrough = bool(cmd.value)
+                    log.info("Passthrough mode = %s", passthrough)
 
                 elif cmd.kind == CmdType.GET_DEVICES:
                     devices = query_devices()
