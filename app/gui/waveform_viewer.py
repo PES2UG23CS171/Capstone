@@ -7,6 +7,7 @@ results in pyqtgraph PlotWidgets with linked X-axes.
 """
 
 from __future__ import annotations
+import os
 
 import sys
 import time
@@ -66,6 +67,14 @@ class _PocWorker(QThread):
         try:
             # Import the PoC module (lives at project root)
             sys.path.insert(0, str(self._out_dir))
+
+            # Force-reload to pick up any parameter changes — Python's
+            # import cache (sys.modules) may hold a stale version from an
+            # earlier run with old/broken defaults.
+            import importlib
+            if "poc_realtime_transient" in sys.modules:
+                importlib.reload(sys.modules["poc_realtime_transient"])
+
             from poc_realtime_transient import (
                 generate_test_signal,
                 RealTimeFilter,
@@ -74,11 +83,22 @@ class _PocWorker(QThread):
                 FLOAT_DTYPE,
             )
 
+            # --- Delete stale WAV files so we never load old data ---
+            self.progress.emit(5, "Cleaning stale files…")
+            for fname in ["test_clean.wav", "test_noisy.wav", "test_noisy_filtered.wav"]:
+                stale = self._out_dir / fname
+                if stale.exists():
+                    stale.unlink()
+                    print(f"  [viewer] Deleted stale: {stale}")
+
             self.progress.emit(10, "Generating synthetic test signal…")
             clean_path, noisy_path = generate_test_signal(out_dir=self._out_dir)
 
             self.progress.emit(40, "Running real-time filter on noisy signal…")
+            # Use absolute path derived from the actual noisy_path
             filtered_path = noisy_path.with_name("test_noisy_filtered.wav")
+            print(f"  [viewer] noisy_path    = {noisy_path.resolve()}")
+            print(f"  [viewer] filtered_path = {filtered_path.resolve()}")
 
             # Load noisy file
             if sf is not None:
@@ -119,21 +139,31 @@ class _PocWorker(QThread):
                 from scipy.io import wavfile as wf
                 wf.write(str(filtered_path), sr, (out * 32767.0).astype(np.int16))
 
+            # --- Verify the filter actually did something ---
+            noisy_rms = float(np.sqrt(np.mean(data ** 2)))
+            filtered_rms = float(np.sqrt(np.mean(out ** 2)))
+            identical = bool(np.allclose(data, out))
+            print(f"  [viewer] noisy    RMS: {noisy_rms:.6f}")
+            print(f"  [viewer] filtered RMS: {filtered_rms:.6f}")
+            print(f"  [viewer] Arrays identical (noisy==filtered): {identical}")
+            if identical:
+                print("  [viewer] WARNING: filter output is identical to input!")
+
             self.progress.emit(95, "Loading waveform data…")
 
-            # Load all three signals for plotting
+            # Use in-memory arrays directly instead of re-reading from disk
+            # This avoids any stale file / wrong path issues
+            clean_data = None
+            noisy_data = data    # the array we already loaded and processed
+            filtered_data = out  # the array the filter just produced
+
+            # Load clean signal from file (it was just freshly generated)
             if sf is not None:
                 clean_data, _ = sf.read(str(clean_path), dtype="float32")
-                noisy_data, _ = sf.read(str(noisy_path), dtype="float32")
-                filtered_data, _ = sf.read(str(filtered_path), dtype="float32")
             else:
                 from scipy.io import wavfile as wf
                 _, c = wf.read(str(clean_path))
-                _, n_ = wf.read(str(noisy_path))
-                _, f_ = wf.read(str(filtered_path))
                 clean_data = c.astype(np.float32) / 32767.0 if c.dtype == np.int16 else c.astype(np.float32)
-                noisy_data = n_.astype(np.float32) / 32767.0 if n_.dtype == np.int16 else n_.astype(np.float32)
-                filtered_data = f_.astype(np.float32) / 32767.0 if f_.dtype == np.int16 else f_.astype(np.float32)
 
             # Flatten to mono
             if clean_data.ndim > 1:
@@ -383,7 +413,11 @@ class WaveformViewer(QMainWindow):
     # ── Processing pipeline ──────────────────────────────────────────────
 
     def _start_processing(self):
-        out_dir = Path.cwd()
+        # Resolve project root from this file's location rather than cwd()
+        # so it works regardless of where the GUI is launched from.
+        # This file lives at <project>/app/gui/waveform_viewer.py
+        out_dir = Path(__file__).resolve().parent.parent.parent
+        print(f"  [viewer] Project root (out_dir) = {out_dir}")
         self._worker = _PocWorker(out_dir, parent=self)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
@@ -408,12 +442,19 @@ class WaveformViewer(QMainWindow):
         self._noisy_path = results["noisy_path"]
         self._filtered_path = results["filtered_path"]
 
+        # ── Diagnostic: verify what's being plotted ──────────────────
+        clean = results["clean"]
+        noisy = results["noisy"]
+        filtered = results["filtered"]
+        sr = results["sr"]
+        print(f"  [viewer] PLOT DATA CHECK:")
+        print(f"    clean    RMS: {np.sqrt(np.mean(clean**2)):.6f}  shape={clean.shape}")
+        print(f"    noisy    RMS: {np.sqrt(np.mean(noisy**2)):.6f}  shape={noisy.shape}")
+        print(f"    filtered RMS: {np.sqrt(np.mean(filtered**2)):.6f}  shape={filtered.shape}")
+        print(f"    Arrays identical (noisy==filtered): {np.allclose(noisy, filtered)}")
+
         # ── Plot waveforms ───────────────────────────────────────────
         if self._plot_clean is not None:
-            clean = results["clean"]
-            noisy = results["noisy"]
-            filtered = results["filtered"]
-            sr = results["sr"]
 
             # Downsample for plotting performance (show every Nth sample)
             n = len(clean)
