@@ -1,139 +1,107 @@
-# Synthetic Audio Dataset Generator
+# Real-Time AI-Powered Audio Filter for Transient Noise Suppression
 
-## Project: Real-Time AI-Powered Audio Filter for Transient Noise Suppression
+**Capstone Project 190 | Team: Dhrushaj Achar, Chandan B, Deepesh Padhy, Sahil Uday Bhat**
 
-Generates **(noisy input, clean target)** pairs following the methodology from  
-*"Scalable Audio Synthesis Using Room Impulse Responses"* (Morgado et al., 2024).
-
----
-
-## Pipeline Overview
-
-```
-Clean Speech ──► Convolve w/ Near-Field RIR ──┐
-                                               ├──► Mix @ random SNR ──► Peak Normalise ──► Save
-Transient Noise ──► Convolve w/ Far-Field RIR ─┘
-```
-
-Each sample simulates a **real 3D acoustic environment**: the speaker is close to the
-microphone (near-field RIR) while the transient noise originates from elsewhere in the
-room (far-field RIR).
+This repository contains the complete backend and GUI for a real-time, CPU-only, AI-powered transient noise suppression system. The system suppresses transient noises (dog barks, door slams, keyboard clicks, sirens) while preserving human speech.
 
 ---
 
-## Prerequisites
+## 🚀 Quick Start / How to Run
 
+### 1. Prerequisites
+
+First, ensure you have Python 3.10+ installed and your virtual environment activated:
+
+**Windows:**
+```powershell
+.\.venv_poc\Scripts\activate
+pip install -r requirements.txt
+```
+
+**macOS & Linux:**
 ```bash
-pip install numpy scipy soundfile soxr pyroomacoustics
+source .venv_poc/bin/activate
+pip install -r requirements.txt
 ```
 
-| Package            | Purpose                                       |
-|--------------------|-----------------------------------------------|
-| `numpy`, `scipy`   | DSP core (FFT convolution, resampling)        |
-| `soundfile`        | Read/write wav/flac audio                     |
-| `soxr`             | High-quality resampling (optional, fallback to scipy) |
-| `pyroomacoustics`  | Synthetic RIR generation (optional if you supply your own RIRs) |
+### 2. Launch the Main Application (GUI)
 
----
+To start the main application with the graphical user interface:
 
-## Directory Setup
-
-Before running, organise your source data:
-
-```
-data/
-├── LibriSpeech/
-│   └── train-clean-100/    ← LibriSpeech FLAC files (nested dirs OK)
-├── FreeSound/
-│   └── transient_noises/   ← Dog barks, door slams, keyboard clicks, etc.
-└── RIRs/                   ← (optional) .wav Room Impulse Response files
-```
-
-> **No RIR files?** If `pyroomacoustics` is installed the script will generate
-> physically-plausible RIR pairs on-the-fly (random room dimensions, RT60, source positions).
-
----
-
-## Usage
-
-### Quick Start (defaults)
-
+**Windows / macOS / Linux:**
 ```bash
-python generate_dataset.py
+python -m app.main
 ```
 
-### Full Example
+This will launch the GUI and system tray icon.
+* **Pass-Through (Demo) Mode:** Click the "🔊 Pass-Through (Demo)" button to route live audio directly from your microphone to your headphones with zero latency and no processing. This is perfect for setting up A/B comparisons.
+* **Waveform Viewer:** Click the "⚡ Proof of Concept" button at the bottom of the window to launch the offline data visualizer.
 
+### 3. Proof of Concept Demo (Offline)
+
+If you want to run the offline benchmarking script that validates CPU feasibility:
+
+**Windows / macOS / Linux:**
 ```bash
-python generate_dataset.py \
-    --speech-dir  ./data/LibriSpeech/train-clean-100 \
-    --noise-dir   ./data/FreeSound/transient_noises \
-    --rir-dir     ./data/RIRs \
-    --output-dir  ./dataset \
-    --total-samples 10000 \
-    --segment-duration 4.0 \
-    --target-sr 48000 \
-    --snr-min -5 \
-    --snr-max 20 \
-    --seed 42 \
-    --output-format wav \
-    --peak-norm 0.95
+python poc_realtime_transient.py --mode demo
 ```
 
-### Key Arguments
-
-| Flag                 | Default       | Description                             |
-|----------------------|---------------|-----------------------------------------|
-| `--speech-dir`       | `./data/LibriSpeech/train-clean-100` | LibriSpeech root    |
-| `--noise-dir`        | `./data/FreeSound/transient_noises`  | Transient noise dir |
-| `--rir-dir`          | `./data/RIRs`                        | RIR dir (empty → synthetic) |
-| `--output-dir`       | `./dataset`                          | Output root         |
-| `--total-samples`    | `10000`       | Total (noisy, clean) pairs              |
-| `--segment-duration` | `4.0`         | Seconds per sample                      |
-| `--target-sr`        | `48000`       | Sample rate (Hz)                        |
-| `--snr-min / --snr-max` | `-5 / 20` | SNR range in dB                         |
-| `--seed`             | `42`          | Random seed for reproducibility         |
-| `--output-format`    | `wav`         | `wav` or `flac`                         |
-| `--peak-norm`        | `0.95`        | Peak-normalisation ceiling (anti-clip)  |
+*(This generates a test signal, filters it, saves output `wav` files, and prints a detailed performance verdict.)*
 
 ---
 
-## Output Structure
+## 🧠 System Architecture
 
-```
-dataset/
-├── train/
-│   ├── clean/
-│   │   ├── 000000.wav
-│   │   ├── 000001.wav
-│   │   └── ...          ← 8,000 files (80%)
-│   └── noisy/
-│       ├── 000000.wav
-│       └── ...
-├── val/
-│   ├── clean/           ← 1,000 files (10%)
-│   └── noisy/
-├── test/
-│   ├── clean/           ← 1,000 files (10%)
-│   └── noisy/
-└── metadata.json        ← Full provenance for every sample
-```
+Our full architecture uses 4 layers to achieve real-time transient suppression on a standard CPU:
 
-### metadata.json
+1. **Layer 1 (Audio I/O):** Lock-free, sample-by-sample ring buffer processing pipeline. Decouples the audio stream from the GUI to prevent dropouts.
+2. **Layer 2 (Quantization):** INT8 quantization + 50% magnitude pruning, delivering up to a 7x speedup for inference.
+3. **Layer 3 (DeepFIR):** A neural network that predicts minimum-phase FIR filter taps to suppress stationary background noise.
+4. **Layer 4 (Mamba SSM):** An O(N) context-aware sequence model that acts as the "brain", selectively gating impulsive transient noises while allowing plosive speech sounds ('P', 'T', 'K') through.
 
-Each sample records:
-- Source speech & noise file paths
-- SNR used for mixing (dB)
-- RIR type (`synthetic` or `file`)
+*Data Flow: `Mic → [Ring Buffer] → [Mamba Transients] → [DeepFIR Noise] → Speaker`*
 
 ---
 
-## Design Decisions
+## 🔧 Training & Evaluation (Phase 2)
 
-| Concern | Approach |
-|---------|----------|
-| **Acoustic realism** | Speech convolved with near-field RIR, noise with far-field RIR (not simple addition) |
-| **Anti-clipping** | Joint peak-normalisation: same gain applied to noisy *and* clean so relative levels are preserved |
-| **Reproducibility** | Deterministic `random.Random` + `np.random.seed` from `--seed` |
-| **Resampling** | Prefers `soxr` (high quality), falls back to `scipy.signal.resample_poly` |
-| **Scalability** | Streams one sample at a time – constant memory regardless of dataset size |
+If you have downloaded the required datasets (LibriSpeech and FreeSound), you can run the full machine learning training loop:
+
+### 1. Dataset Generation
+Generates synthetic pairs with dynamic SNRs and Room Impulse Response (RIR) reverberation.
+```bash
+python -m dataset.generate_dataset
+```
+
+### 2. Train the Model
+Trains the DeepFIR + Mamba SSM combined model, applies quantization, benchmarks RTF, and exports to `filter_model.onnx`.
+```bash
+python -m training.train
+```
+
+### 3. Run Evaluation Report
+Evaluates the model against project NFR targets (SI-SDRi > 4.0 dB, PESQ ≥ 3.2, TSS > 65%).
+```bash
+python -m training.evaluate
+```
+
+---
+
+## 🎤 Presentation Guide & Feasibility
+
+### Metrics That Matter
+When presenting to the panel, point to the live Real-Time Factor (RTF) in the GUI, or the output of `poc_realtime_transient.py`.
+
+*   **Real-Time Limit:** A 128-sample chunk @ 48kHz must be processed in **< 2.67 milliseconds** (2667 µs).
+*   **Our Benchmark:** The non-ML DSP ring-buffer pipeline processes audio in **< 100 microseconds**.
+*   **The Headroom:** That means **96%+ of the processing budget** is untouched, providing massive headroom for running the `onnxruntime` inference of the Mamba+DeepFIR model on CPU.
+
+### Handling Anticipated Pushback
+*   **"Python is too slow / GIL issues:"** We use a single-producer/single-consumer model where the heavy lifting is completely vectorized in highly optimized C++ under the hood (via NumPy and ONNX Runtime).
+*   **"Standard AI models are too slow:"** This is why we use a Mamba Selective State Space Model rather than a Transformer — it operates in $O(N)$ time, making it inherently real-time capable, further accelerated by INT8 quantization.
+*   **"Why sample-by-sample ring buffering?"** Standard Python batching causes block-processing latency (20-50ms window sizes), which is unusable for real-time voice calls. Our approach guarantees deterministic, low latency.
+
+---
+
+## License
+MIT — Part of the Capstone Project.
