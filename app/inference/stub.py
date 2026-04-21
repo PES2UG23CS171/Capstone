@@ -12,35 +12,23 @@ from __future__ import annotations
 import numpy as np
 
 
-import torch
-import config as cfg
-from model.combined_model import CombinedModel
+class StubDenoiser:
+    """Drop-in replacement for the future ONNXDenoiser.
 
-class PyTorchDenoiser:
-    """Drop-in real model inference using PyTorch natively."""
+    Public API contract (same as the real model):
+        __init__(model_path, sample_rate, block_size)
+        process(block: np.ndarray) -> np.ndarray
+    """
 
     def __init__(
         self,
         model_path: str | None = None,
         sample_rate: int = 48_000,
-        block_size: int = 256,
+        block_size: int = 1024,
     ) -> None:
         self.sample_rate = sample_rate
         self.block_size = block_size
         self._strength: float = 1.0   # 0 = bypass, 1 = full processing
-        
-        self.device = "cpu"
-        self.model = CombinedModel()
-        
-        # Load best.pt weights
-        import os
-        checkpoint = "checkpoints/best.pt"
-        if os.path.exists(checkpoint):
-            self.model.load_state_dict(torch.load(checkpoint, map_location=self.device, weights_only=True))
-        self.model.eval()
-        
-        # Pre-allocate hidden states for Mamba
-        self.hidden_states = self.model.mamba.init_hidden(batch_size=1, device=self.device)
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -53,39 +41,35 @@ class PyTorchDenoiser:
         self._strength = float(np.clip(value, 0.0, 1.0))
 
     def process(self, block: np.ndarray) -> np.ndarray:
-        if self._strength == 0.0:
-            return block.copy()
+        """Process a single audio block.
 
-        # Convert to tensor. `block` is typically (frames, 1). 
-        # We need (1, frames) for [Batch, Time] context streaming.
-        noisy_tensor = torch.tensor(block, dtype=torch.float32, device=self.device)
-        if noisy_tensor.ndim == 2 and noisy_tensor.shape[1] == 1:
-            noisy_tensor = noisy_tensor.squeeze(1)  # (frames,)
-            
-        chunk = noisy_tensor.unsqueeze(0)  # (1, frames)
-        
-        # Real-time inference implementation
-        with torch.no_grad():
-            outputs = []
-            for i in range(len(noisy_tensor)):
-                sample = noisy_tensor[i].unsqueeze(0)  # [1]
-                out, self.hidden_states = self.model.forward_realtime(
-                    sample, self.hidden_states
-                )
-                outputs.append(out)
+        Parameters
+        ----------
+        block : np.ndarray, shape (frames,) or (frames, channels)
+            Raw PCM float32 input from the microphone.
 
-        out = torch.cat(outputs)  # (frames,)
+        Returns
+        -------
+        np.ndarray
+            Denoised PCM float32 output (same shape as *block*).
 
-        denoised = out.numpy()
-        if block.ndim == 2:
-            denoised = denoised[:, np.newaxis]  # match original (frames, 1) shape
-        denoised = denoised[:len(block)]
+        Phase 1 behaviour
+        -----------------
+        Pure passthrough — the audio is returned unchanged.
+        When ``strength < 1.0`` the output is a crossfade between the
+        original and the "denoised" version (which is also the original,
+        so the effect is inaudible).  This exercises the wet/dry mix path
+        that Phase 2 will rely on.
+        """
+        # ---- Phase 2: replace this block with ONNX inference ----
+        denoised = block.copy()
+        # ---------------------------------------------------------
 
+        # Wet / dry crossfade (useful once the real model is in place)
         if self._strength < 1.0:
             return (1.0 - self._strength) * block + self._strength * denoised
 
         return denoised
-
 
 
 class ONNXDenoiser:
