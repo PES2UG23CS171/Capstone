@@ -233,7 +233,7 @@ class ControlWindow(QMainWindow):
         root.addWidget(grp_meters)
 
         # ── Proof of Concept button ──────────────────────────────────────
-        self.btn_poc = QPushButton("⚡  Proof of Concept")
+        self.btn_poc = QPushButton("View Graph in the GUI")
         self.btn_poc.setMinimumHeight(36)
         poc_font = QFont()
         poc_font.setPointSize(11)
