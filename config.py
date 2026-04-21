@@ -37,7 +37,7 @@ MAX_ALGORITHMIC_LATENCY_MS = 100
 MAX_END_TO_END_LATENCY_MS = 300
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-DATASET_DIR = "data/synthetic"
+DATASET_DIR = "dataset"
 LIBRISPEECH_DIR = "data/raw/librispeech"
 FREESOUND_DIR = "data/raw/freesound"
 RIR_DIR = "data/raw/openair_rirs"
@@ -50,3 +50,5 @@ EPOCHS = 50
 LR = 1e-3
 SNR_RANGE_DB = (-5, 20)       # Dynamic mixing SNR range
 NUM_SYNTHETIC_PAIRS = 10_000
+TRAIN_CONTEXT_WINDOW = 64     # Shorter window for training speed (model is length-agnostic)
+TRAIN_EPOCHS = 50             # Number of training epochs
