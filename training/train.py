@@ -30,25 +30,47 @@ from model.export_onnx import export_to_onnx
 from training.losses import si_sdr_loss
 
 
-def train(resume: bool = False) -> None:
+def _select_device() -> str:
+    """Pick the best available device: MPS (Apple Silicon) > CPU."""
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        print("  Device: MPS (Apple Silicon GPU)")
+        return "mps"
+    print("  Device: CPU")
+    return "cpu"
+
+
+def train(resume: bool = False, epochs: int | None = None) -> None:
     """Full training loop."""
 
     print("=" * 60)
     print("  Training — Real-Time Transient Noise Suppressor")
     print("=" * 60)
 
+    num_epochs = epochs if epochs is not None else cfg.EPOCHS
+
+    # ── Device ───────────────────────────────────────────────────────────
+    device = _select_device()
+
     # ── Dataset ──────────────────────────────────────────────────────────
     try:
         from dataset.dataset_loader import TransientNoiseDataset
 
-        train_ds = TransientNoiseDataset(cfg.DATASET_DIR, split="train")
-        val_ds = TransientNoiseDataset(cfg.DATASET_DIR, split="val")
+        train_ds = TransientNoiseDataset(
+            cfg.DATASET_DIR, split="train",
+            context_window=cfg.TRAIN_CONTEXT_WINDOW,
+        )
+        val_ds = TransientNoiseDataset(
+            cfg.DATASET_DIR, split="val", augment=False,
+            context_window=cfg.TRAIN_CONTEXT_WINDOW,
+        )
 
         train_loader = DataLoader(
-            train_ds, batch_size=cfg.BATCH_SIZE, shuffle=True, num_workers=0
+            train_ds, batch_size=cfg.BATCH_SIZE, shuffle=True,
+            num_workers=2, pin_memory=False,
         )
         val_loader = DataLoader(
-            val_ds, batch_size=cfg.BATCH_SIZE, shuffle=False, num_workers=0
+            val_ds, batch_size=cfg.BATCH_SIZE, shuffle=False,
+            num_workers=2, pin_memory=False,
         )
         print(f"  Train samples: {len(train_ds)}")
         print(f"  Val samples  : {len(val_ds)}")
@@ -61,13 +83,11 @@ def train(resume: bool = False) -> None:
     # ── Model ────────────────────────────────────────────────────────────
     model = CombinedModel()
     model.count_parameters()
-
-    device = "cpu"
     model = model.to(device)
 
     # ── Optimiser & scheduler ────────────────────────────────────────────
     optimiser = torch.optim.AdamW(model.parameters(), lr=cfg.LR, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=cfg.EPOCHS)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=num_epochs)
 
     # ── Resume ───────────────────────────────────────────────────────────
     ckpt_dir = Path(cfg.CHECKPOINT_DIR)
@@ -93,12 +113,12 @@ def train(resume: bool = False) -> None:
         log_writer.writerow(["epoch", "train_loss", "val_loss", "lr", "elapsed_s"])
 
     # ── Training loop ────────────────────────────────────────────────────
-    for epoch in range(start_epoch, cfg.EPOCHS):
+    for epoch in range(start_epoch, num_epochs):
         t0 = time.time()
         model.train()
         train_losses = []
 
-        iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.EPOCHS}") if tqdm else train_loader
+        iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}") if tqdm else train_loader
 
         for noisy, clean in iterator:
             noisy, clean = noisy.to(device), clean.to(device)
@@ -137,13 +157,16 @@ def train(resume: bool = False) -> None:
         log_file.flush()
 
         # Save checkpoint
+        # Move model to CPU for saving to ensure portability
+        model_cpu_state = {k: v.cpu() for k, v in model.state_dict().items()}
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), ckpt_dir / "best.pt")
+            torch.save(model_cpu_state, ckpt_dir / "best.pt")
 
         torch.save({
             "epoch": epoch,
-            "model": model.state_dict(),
+            "model": model_cpu_state,
             "optimiser": optimiser.state_dict(),
             "best_val_loss": best_val_loss,
         }, ckpt_dir / "latest.pt")
@@ -155,10 +178,13 @@ def train(resume: bool = False) -> None:
     print("  Post-Training: Prune → Quantize → Benchmark → Export")
     print("=" * 60)
 
+    # Move model to CPU for post-processing (quantization requires CPU)
+    model = model.to("cpu")
+
     # Load best
     best_path = ckpt_dir / "best.pt"
     if best_path.exists():
-        model.load_state_dict(torch.load(best_path, map_location=device, weights_only=True))
+        model.load_state_dict(torch.load(best_path, map_location="cpu", weights_only=True))
 
     # Prune
     print("\n  Applying magnitude pruning…")
@@ -190,5 +216,6 @@ def _dummy_loader(n: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs")
     args = parser.parse_args()
-    train(resume=args.resume)
+    train(resume=args.resume, epochs=args.epochs)
