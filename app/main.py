@@ -30,28 +30,6 @@ import logging
 import multiprocessing
 import signal
 import sys
-import os
-from pathlib import Path
-
-# ── macOS: Virtual environment GUI fix ───────────────────────────────
-# We intercept this instantly and transparently re-launch the process
-# using the true framework base-executable.
-if sys.platform == "darwin" and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable:
-    current_pythonpath = os.environ.get("PYTHONPATH", "")
-    if os.getcwd() not in current_pythonpath.split(":"):
-        os.environ["PYTHONPATH"] = f"{os.getcwd()}:{current_pythonpath}".strip(":")
-    
-    # Relaunch using module syntax so sys.path[0] doesn't resolve to 'app'
-    if len(sys.argv) > 0 and 'app/main.py' in sys.argv[0]:
-        args = ["-m", "app.main"] + sys.argv[1:]
-    else:
-        args = sys.argv
-    os.execl(sys._base_executable, sys._base_executable, *args)
-
-# Inject project root explicitly to guarantee `import config` loads Capstone/config.py
-project_root = str(Path(__file__).resolve().parent.parent)
-if sys.path[0] != project_root:
-    sys.path.insert(0, project_root)
 
 from PyQt6.QtWidgets import QApplication
 
@@ -65,6 +43,21 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    # ── macOS: Virtual environment GUI fix ───────────────────────────────
+    # A standard venv python executable on macOS lacks the Bundle ID context 
+    # required by AppKit/Cocoa, which causes PyQt6 to fatally crash the app.
+    # We intercept this instantly and transparently re-launch the process 
+    # using the true framework base-executable. We deliberately DO NOT inject
+    # the venv's site-packages via PYTHONPATH, as PyQt6 loaded from a venv
+    # triggers a known "cocoa" plugin ABI mismatch when run by a system binary.
+    # The system Python 3.12 already contains all required global dependencies.
+    import sys
+    import os
+    if sys.platform == "darwin" and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable:
+        current_pythonpath = os.environ.get("PYTHONPATH", "")
+        if os.getcwd() not in current_pythonpath.split(":"):
+            os.environ["PYTHONPATH"] = f"{os.getcwd()}:{current_pythonpath}".strip(":")
+        os.execl(sys._base_executable, sys._base_executable, *sys.argv)
     # ── Logging ──────────────────────────────────────────────────────────
     logging.basicConfig(
         level=logging.INFO,

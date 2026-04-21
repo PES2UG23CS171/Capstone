@@ -37,7 +37,7 @@ import sounddevice as sd
 
 from app.audio.devices import query_devices
 from app.config import AppConfig
-from app.inference.stub import PyTorchDenoiser
+from app.inference.stub import StubDenoiser
 from app.ipc.messages import (
     CmdType,
     Command,
@@ -130,7 +130,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     else:
         log.warning("RealTimeFilter not available — falling back to StubDenoiser.")
 
-    denoiser = PyTorchDenoiser(
+    denoiser = StubDenoiser(
         model_path=cfg.model_path,
         sample_rate=cfg.sample_rate,
         block_size=cfg.block_size,
@@ -166,7 +166,29 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             current_rtf = 0.0
             return
 
-        if enabled:
+        if enabled and rt_filter is not None:
+            # Process through RealTimeFilter in 128-sample sub-chunks
+            mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+            n = len(mono)
+            chunk_size = 128
+            i = 0
+            while i + chunk_size <= n:
+                mono[i:i + chunk_size] = rt_filter.process_chunk(mono[i:i + chunk_size])
+                i += chunk_size
+            # Process remainder
+            if i < n:
+                tail = np.zeros(chunk_size, dtype=np.float32)
+                tail[:n - i] = mono[i:]
+                processed_tail = rt_filter.process_chunk(tail)
+                mono[i:] = processed_tail[:n - i]
+            processed = mono[:, np.newaxis] if indata.ndim > 1 else mono
+
+            # Update RTF from profiler
+            if rt_filter.profiler._times:
+                last_t = rt_filter.profiler._times[-1]
+                budget = chunk_size / cfg.sample_rate
+                current_rtf = last_t / budget
+        elif enabled:
             processed = denoiser.process(indata[:, :cfg.channels].copy())
         else:
             processed = indata[:, :cfg.channels].copy()
