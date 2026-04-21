@@ -24,6 +24,8 @@ The model was tasked to separate unvoiced transient phenomena (FreeSound dataset
 ### Convergence Benchmarks
 The network trained with remarkable stability and did not overfit significantly.
 
+![SI-SDR Training Convergence Graph](training_convergence.png)
+
 | Checkpoint | Epoch | Learning Rate | Training SI-SDR | Validation SI-SDR |
 | :--- | :--- | :--- | :--- | :--- |
 | **Initial Check** | 1 | 9.99e-4 | -5.61 dB | -10.12 dB |
