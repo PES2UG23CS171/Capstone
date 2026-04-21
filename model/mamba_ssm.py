@@ -87,6 +87,30 @@ def selective_scan_sequential(
     return y
 
 
+@torch.jit.script
+def _scan_loop(
+    dA_all: torch.Tensor,
+    dBu_all: torch.Tensor,
+    C: torch.Tensor,
+    D_param: torch.Tensor,
+    u: torch.Tensor,
+    L: int,
+) -> torch.Tensor:
+    """JIT-compiled scan loop — compiles to C++, no Python overhead."""
+    B_batch = u.shape[0]
+    D_dim = dA_all.shape[2]
+    N = dA_all.shape[3]
+
+    h = torch.zeros(B_batch, D_dim, N, device=u.device, dtype=u.dtype)
+    y = torch.zeros_like(u)
+
+    for t in range(L):
+        h = h * dA_all[:, t] + dBu_all[:, t]
+        y[:, t] = (h * C[:, t].unsqueeze(1)).sum(dim=-1) + D_param * u[:, t]
+
+    return y
+
+
 def selective_scan_parallel(
     u: torch.Tensor,
     delta: torch.Tensor,
@@ -95,45 +119,26 @@ def selective_scan_parallel(
     C: torch.Tensor,
     D: torch.Tensor,
 ) -> torch.Tensor:
-    """Parallel selective scan for training (uses cumsum trick).
+    """Fast selective scan using JIT-compiled C++ loop.
 
-    Same interface as ``selective_scan_sequential`` but vectorised over the
-    sequence dimension for GPU/CPU training throughput.
+    Pre-computes all discretised parameters then runs the recurrence in
+    compiled code — eliminates Python interpreter overhead while keeping
+    the sequential formulation that is numerically stable.
+
+    Same interface as ``selective_scan_sequential``.
     """
     B_batch, L, D_dim = u.shape
     N = A.shape[1]
 
     A_real = -torch.exp(A.float())  # [D, N]
 
-    # Compute discretised parameters for all timesteps
-    dt_A = delta.unsqueeze(-1) * A_real   # [B, L, D, N]
-    dt_B_u = (delta.unsqueeze(-1) * B.unsqueeze(2) *
-              u.unsqueeze(-1))             # [B, L, D, N]
+    # Pre-compute discretised parameters for all timesteps
+    dt_A = delta.unsqueeze(-1) * A_real        # [B, L, D, N]
+    dA_all = torch.exp(dt_A)                    # [B, L, D, N]
+    dBu_all = (delta.unsqueeze(-1) * B.unsqueeze(2) *
+               u.unsqueeze(-1))                 # [B, L, D, N]
 
-    # Parallel prefix sum using cumulative operations
-    # This is an approximation that works for short sequences
-    # For exactness we fall back to sequential
-    if L > 2048:
-        return selective_scan_sequential(u, delta, A, B, C, D)
-
-    # Compute running state via cumulative scan
-    log_dA = dt_A                          # [B, L, D, N]
-    cumlog = torch.cumsum(log_dA, dim=1)   # [B, L, D, N]
-
-    # State at each timestep (approximate via exp-sum)
-    states = torch.zeros(B_batch, L, D_dim, N, device=u.device, dtype=u.dtype)
-    h = torch.zeros(B_batch, D_dim, N, device=u.device, dtype=u.dtype)
-    for t in range(L):
-        dA = torch.exp(dt_A[:, t])                       # [B, D, N]
-        dBu = dt_B_u[:, t]                               # [B, D, N]
-        h = dA * h + dBu
-        states[:, t] = h
-
-    # Output projection
-    y = (states * C.unsqueeze(2)).sum(dim=-1)  # [B, L, D]
-    y = y + D * u
-
-    return y
+    return _scan_loop(dA_all, dBu_all, C, D, u, L)
 
 
 # ---------------------------------------------------------------------------

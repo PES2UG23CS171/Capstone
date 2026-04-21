@@ -88,6 +88,10 @@ def quantize_model_int8(
                     break
                 _ = model(noisy)
 
+    # Set quantized engine explicitly for Apple Silicon/ARM to prevent NoQEngine error
+    if "qnnpack" in torch.backends.quantized.supported_engines:
+        torch.backends.quantized.engine = "qnnpack"
+    
     # Dynamic quantization (no GPU required)
     quantized = torch.quantization.quantize_dynamic(
         model,

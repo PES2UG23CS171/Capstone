@@ -155,13 +155,15 @@ class DeepFIRPredictor(nn.Module):
         # Causal padding
         audio_padded = F.pad(audio, (fir_len - 1, 0))  # [B, T + fir_len - 1]
 
-        # Process each batch element with its own FIR taps
-        outputs = []
-        for i in range(B):
-            # Single-element conv1d: [1, 1, T+K-1] * [1, 1, K] → [1, 1, T]
-            x_i = audio_padded[i].unsqueeze(0).unsqueeze(0)      # [1, 1, T+K-1]
-            w_i = taps[i].flip(0).unsqueeze(0).unsqueeze(0)      # [1, 1, K]
-            y_i = F.conv1d(x_i, w_i)                              # [1, 1, T]
-            outputs.append(y_i.squeeze(0).squeeze(0))
+        if B == 1:
+            # Safe ONNX export inference shape 
+            x = audio_padded.unsqueeze(0)                    # [1, 1, T+K-1]
+            w = taps.flip(1).unsqueeze(1)                    # [1, 1, K]
+            y = F.conv1d(x, w, groups=1)                     # [1, 1, T]
+        else:
+            # Batched grouped convolution — all B elements at once
+            x = audio_padded.unsqueeze(0)                    # [1, B, T+K-1]
+            w = taps.flip(1).unsqueeze(1)                    # [B, 1, K]
+            y = F.conv1d(x, w, groups=B)                     # [1, B, T]
 
-        return torch.stack(outputs, dim=0)  # [B, T]
+        return y.squeeze(0)                              # [B, T]
