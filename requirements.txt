@@ -1,32 +1,34 @@
-# ── GUI & System Tray ────────────────────────────────────────────────────────
+# voiceiso — CPU-only real-time voice isolation
+# ─────────────────────────────────────────────────────────────────────────────
+# Enhancement core
+#   NOTE: deepfilternet builds a Rust extension (deepfilterlib).  Install a Rust
+#   toolchain first:  curl https://sh.rustup.rs -sSf | sh -s -- -y
+#   It also pins numpy<2.  A torchaudio>=2.1 compatibility shim lives in
+#   voiceiso/_compat.py (imported before df).
+deepfilternet>=0.5.6
+
+# Voice activity detection
+silero-vad>=6.0
+
+# Acoustic echo cancellation reference (optional, native build):
+#   webrtc-audio-processing  — WebRTC APM (AEC3/AGC/NS).  The pure-numpy PBFDAF
+#   in voiceiso/stages/aec.py needs no native deps and is the default.
+
+# Core DSP / audio I/O
+numpy>=1.24,<2
+scipy>=1.10
+soundfile>=0.12
+sounddevice>=0.4
+torch>=2.2
+torchaudio>=2.2
+
+# Evaluation (optional but recommended)
+pesq>=0.0.4          # PESQ-wb
+pystoi>=0.3          # STOI / ESTOI  (optional)
+librosa>=0.10        # feature extraction / resampling helpers
+
+# Desktop app (GUI + tray)
 PyQt6>=6.5
 pystray>=0.19
-
-# ── Audio I/O ────────────────────────────────────────────────────────────────
-sounddevice>=0.4
-numpy>=1.24
-
-# ── Waveform Plotting ────────────────────────────────────────────────────────
 pyqtgraph>=0.13
-
-# ── Icon generation (pystray needs a PIL Image) ─────────────────────────────
 Pillow>=10.0
-
-# ── Deep Learning ────────────────────────────────────────────────────────────
-torch>=2.2.0
-torchaudio>=2.2.0
-
-# ── Inference Engine ─────────────────────────────────────────────────────────
-onnx>=1.16.0
-onnxruntime>=1.18.0
-
-# ── Audio Processing ────────────────────────────────────────────────────────
-scipy
-soundfile
-librosa>=0.10.0
-
-# ── Evaluation ───────────────────────────────────────────────────────────────
-pesq>=0.0.4
-
-# ── Training ────────────────────────────────────────────────────────────────
-tqdm>=4.66.0

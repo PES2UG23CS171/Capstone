@@ -1,0 +1,3 @@
+Legacy archive: original capstone (DeepFIR+Mamba model, classical-DSP RealTimeFilter,
+ONNX export, synthetic dataset gen). Superseded by the voiceiso/ pipeline (DeepFilterNet3
+core + VAD/AEC/noise-class/controller/post-filter). Kept for reference and citation.
