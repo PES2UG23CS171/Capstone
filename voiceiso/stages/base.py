@@ -10,7 +10,7 @@ internal state across calls.  This is what makes the whole pipeline real-time.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -29,14 +29,32 @@ class FrameContext:
     # ── Analysis signals filled in by stages ─────────────────────────────
     vad_prob: float = 0.0              # P(speech) ∈ [0, 1]
     is_speech: bool = False            # thresholded + hangover-smoothed
+    speech_conf: float = 0.0           # fused speech confidence (VAD + consonants + voiced)
     noise_class: str = "clean"         # top noise label this frame
     noise_probs: Dict[str, float] = field(default_factory=dict)
+    noise_conf: float = 0.0            # top-class probability (classifier confidence)
     snr_db: float = 0.0                # instantaneous estimate
     environment: str = "unknown"       # coarse env tag (quiet/office/outdoor/…)
+
+    # ── Speaker identity (set by SpeakerEmbedder) ────────────────────────
+    # 1.0 means "is the target" or "no enrollment / not measured" (passthrough).
+    target_speaker_sim: float = 1.0
+
+    # ── AEC signals ──────────────────────────────────────────────────────
+    dt_active: bool = False            # double-talk currently detected
+    res_band: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+                                       # per-band residual-echo coherence ∈ [0, 1]
 
     # ── Control signals (set by the dynamic controller) ──────────────────
     suppression: float = 1.0           # 0 = dry, 1 = full wet
     postfilter_strength: float = 1.0
+    # Per-band gain applied AFTER DFN3 (low / mid / high).  1.0 = unchanged.
+    band_gain: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+    # ── Internal: pre-enhancement dry audio retained for rollback ────────
+    # The controller's over-suppression rollback path needs the (post-AEC,
+    # pre-DFN) dry signal to blend back in on artifact frames.
+    dry_audio: Optional[np.ndarray] = None
 
     # ── Diagnostics ──────────────────────────────────────────────────────
     meta: Dict[str, float] = field(default_factory=dict)

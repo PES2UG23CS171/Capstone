@@ -38,16 +38,31 @@ class _BaseClassifier(Stage):
 
 
 class HeuristicNoiseClassifier(_BaseClassifier):
-    """Cheap spectral/temporal heuristic classifier."""
+    """Cheap spectral/temporal heuristic classifier with EWMA frame smoothing."""
+
+    # α for exponential smoothing of per-class probabilities across frames.
+    # Low α = slow response (stable labels); high α = fast but noisy.
+    _SMOOTH_ALPHA = 0.35
 
     def __init__(self, cfg: PipelineConfig) -> None:
         super().__init__(cfg)
         self._prev_mag = None
         self._energy_hist: list[float] = []
+        self._smoothed: dict[str, float] = {c: 0.0 for c in cfg.noise_classes}
+        # Running average flux (used as the transient detector's baseline).
+        # Compare instantaneous flux against this slow average — anything
+        # ≥ 3× the running average is a credible onset.
+        self._flux_avg = 1e-6
+        # Previous-frame spectral centroid — used by the high-VAD competing-
+        # speech detector (rapid centroid drift = two-talker overlap signature).
+        self._prev_centroid: float | None = None
 
     def reset(self) -> None:
         self._prev_mag = None
         self._energy_hist.clear()
+        self._smoothed = {c: 0.0 for c in self.classes}
+        self._flux_avg = 1e-6
+        self._prev_centroid = None
 
     @staticmethod
     def _flatness(mag: np.ndarray) -> float:
@@ -75,13 +90,21 @@ class HeuristicNoiseClassifier(_BaseClassifier):
             flux = float(np.mean(np.maximum(mag - self._prev_mag, 0.0)))
         self._prev_mag = mag
 
-        probs = {c: 0.0 for c in self.classes}
+        # Update running-average flux (slow EMA — ~1 s time constant at 20 ms
+        # block rate, α=0.04).  This is the baseline against which we test
+        # transient onsets.  A previous version compared flux to mag.mean(),
+        # which is mathematically impossible because flux ≤ mean(mag) always.
+        self._flux_avg = 0.96 * self._flux_avg + 0.04 * flux
+
+        probs: dict[str, float] = {c: 0.0 for c in self.classes}
 
         # 1. Effectively silent / clean relative to floor.
         if ctx.snr_db < 3.0 and energy < 10 ** (ctx.meta.get("noise_floor_db", -60) / 10) * 3:
             probs["clean"] = 1.0
-        # 2. Transient: sharp spectral flux onset.
-        elif flux > 5.0 * (np.mean(list(probs.values())) + mag.mean()):
+        # 2. Transient: instantaneous flux is much larger than its running average
+        #    (sharp onset).  Threshold 3× the EMA with an absolute floor so a
+        #    sustained quiet signal doesn't fire on tiny relative spikes.
+        elif flux > 3.0 * self._flux_avg and flux > 1e-4:
             if lf > 0.5:
                 probs["door_slam"] = 0.8
             elif hf > 0.4:
@@ -92,9 +115,22 @@ class HeuristicNoiseClassifier(_BaseClassifier):
         elif flat < 0.15 and stationarity > 0.6:
             probs["music"] = 0.6
             probs["television"] = 0.3
-        # 4. Speech-like spectrum while our VAD is uncertain → competing speech.
-        elif 200 < centroid < 2500 and 0.15 < flat < 0.5 and ctx.vad_prob < 0.6:
-            probs["competing_speech"] = 0.6
+        # 4. Speech-like spectrum.  Two reachability cases:
+        #    (a) VAD low (gap between primary-speaker words) but the spectrum
+        #        still looks like speech → background talker.
+        #    (b) VAD high but centroid is *unstably* drifting frame-to-frame —
+        #        the hallmark of two-talker overlap (each speaker pulls the
+        #        composite centroid toward their own formant centre).  Single
+        #        speaker formants drift slowly; competing talkers drift fast.
+        elif 200 < centroid < 2500 and 0.15 < flat < 0.5:
+            if ctx.vad_prob < 0.35:
+                probs["competing_speech"] = 0.6     # case (a)
+            elif self._prev_centroid is not None:
+                # Frame-to-frame relative centroid change normalised by centroid
+                # magnitude.  Two-talker overlap typically gives > 0.15.
+                drift = abs(centroid - self._prev_centroid) / max(centroid, 1.0)
+                if drift > 0.15 and ctx.vad_prob >= 0.4:
+                    probs["competing_speech"] = 0.5     # case (b)
         # 5. Stationary broadband → fan/HVAC (low) or traffic (mid/high).
         elif stationarity > 0.5:
             if centroid < 800:
@@ -106,13 +142,23 @@ class HeuristicNoiseClassifier(_BaseClassifier):
         else:
             probs["traffic"] = 0.4
 
-        top = max(probs, key=probs.get)
-        if probs[top] == 0.0:
+        # EWMA smoothing across frames: prevents single-frame outliers from
+        # triggering controller reactions through the 30 ms attack path.
+        alpha = self._SMOOTH_ALPHA
+        for c in self.classes:
+            self._smoothed[c] = (1.0 - alpha) * self._smoothed[c] + alpha * probs.get(c, 0.0)
+
+        top = max(self._smoothed, key=self._smoothed.get)
+        if self._smoothed[top] < 1e-6:
             top = "clean"
         ctx.noise_class = top
-        ctx.noise_probs = probs
+        ctx.noise_probs = dict(self._smoothed)
+        # Top-class probability — used by the controller's confidence scaling.
+        ctx.noise_conf = float(self._smoothed[top])
         ctx.meta["spec_flatness"] = flat
         ctx.meta["spec_centroid"] = centroid
+        ctx.meta["noise_conf"] = ctx.noise_conf
+        self._prev_centroid = centroid
         return ctx
 
 

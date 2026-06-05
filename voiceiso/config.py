@@ -54,6 +54,46 @@ class PipelineConfig:
     # ── AEC ──────────────────────────────────────────────────────────────
     aec_enabled: bool = False          # requires a reference (loopback) signal
     aec_filter_ms: float = 200.0       # adaptive filter length (tail coverage)
+    aec_dtd_threshold: float = 0.5     # Geigel double-talk detector threshold
+    aec_dt_freeze_ms: float = 1000.0   # how long to freeze NLMS after double-talk
+    aec_step_size: float = 0.15        # NLMS µ; halved from V1 (was 0.3) for stability
+
+    # ── Multi-band controller (V2) ───────────────────────────────────────
+    # Band split frequencies for post-DFN per-band gain modulation.
+    band_low_hz: float = 300.0         # < this = low band
+    band_high_hz: float = 4000.0       # > this = high band; between = mid band
+    # Linear-phase FIR length.  31 taps → group delay 15 samples ≈ 0.31 ms at
+    # 48 kHz — short enough that bench SI-SDR is preserved (delay-sensitive
+    # metric), still long enough to give meaningful band separation for the
+    # coarse 3-band split.  Earlier 65-tap design (0.67 ms) tanked SI-SDR by
+    # ~25 dB on every block boundary the controller switched gain modes.
+    band_fir_taps: int = 31
+
+    # ── Speaker (target-speaker extraction) ──────────────────────────────
+    speaker_model_path: Optional[str] = None     # ECAPA-TDNN ONNX (None = disabled)
+    speaker_enroll_path: Optional[str] = None    # path to enrolled 192-dim x-vector
+    speaker_sim_threshold: float = 0.25          # below = strong competing-speech cut
+    speaker_window_ms: float = 200.0             # ECAPA analysis window
+    speaker_update_ms: float = 100.0             # rerun ECAPA at this cadence
+
+    # ── Post-filter (learned tiny GRU) ───────────────────────────────────
+    postfilter_model_path: Optional[str] = None  # tiny GRU ONNX (None = bypass)
+
+    # ── Speech-quality protection (over-suppression rollback) ────────────
+    artifact_band_drop_db: float = 25.0  # sub-band drop that flags over-suppression
+    artifact_rollback_mix: float = 0.30  # dry-blend fraction during rollback
+    artifact_cap_relief_db: float = 12.0 # how much to relax next-frame atten cap
+
+    # ── Live-stream queue / latency mode ─────────────────────────────────
+    # Trade-off:  small queue + latency='low' → minimum end-to-end delay but
+    #             intolerant of CPU bursts (xrun → silent drop).
+    #             Larger queue + latency='high' → more delay but smoother.
+    # Defaults pick a middle ground: 4-deep queue (~80 ms of slack at 20 ms
+    # blocks) with latency='low'.  V1 used 16-deep + 'high' which silently
+    # ballooned latency to 1.6 s under load; V2-α used 2-deep + 'low' which
+    # was too tight on stock laptops.
+    live_queue_maxsize: int = 4
+    live_latency_mode: str = "low"
 
     # ── Paths ────────────────────────────────────────────────────────────
     dfn_model_dir: Optional[str] = None  # None → DFN3 default bundled model

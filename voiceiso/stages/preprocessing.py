@@ -31,14 +31,20 @@ class Preprocessing(Stage):
         self.sr = cfg.sample_rate
         # Gentle 1st-order DC/subsonic blocker — transparent to speech.
         self._sos = butter(1, highpass_hz / (self.sr / 2.0), btype="high", output="sos")
-        self._zi = sosfilt_zi(self._sos).astype(np.float64)
+        # State initialised to zero (not steady-state-for-unit-input).
+        # ``sosfilt_zi`` returns the state that produces zero output for a
+        # constant-1.0 input — applied to a real signal that starts near zero,
+        # that initial state causes a huge transient at sample 0 that can
+        # saturate the post-filter's soft-limit knee for the first ~100 ms.
+        # Zero state gives a clean ramp-up instead.
+        self._zi = np.zeros_like(sosfilt_zi(self._sos)).astype(np.float64)
         # Minimum-statistics noise floor (power) + speech-power tracker.
         self._noise_pow = 1e-6
         self._sig_pow = 1e-6
         self._floor_hist: list[float] = []
 
     def reset(self) -> None:
-        self._zi = sosfilt_zi(self._sos).astype(np.float64)
+        self._zi = np.zeros_like(sosfilt_zi(self._sos)).astype(np.float64)
         self._noise_pow = 1e-6
         self._sig_pow = 1e-6
         self._floor_hist.clear()
