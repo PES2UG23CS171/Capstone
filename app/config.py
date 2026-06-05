@@ -17,7 +17,10 @@ class AppConfig:
 
     # ── Audio stream parameters ──────────────────────────────────────────
     sample_rate: int = 48_000
-    block_size: int = 1024          # frames per callback (≈21 ms @ 48 kHz)
+    # 100 ms blocks: DeepFilterNet3's efficient operating point (RTF ≈ 0.13 vs
+    # 0.55 at 20 ms).  The voiceiso pipeline runs inline on the callback at
+    # ~21 ms work per 100 ms block — xrun-safe with margin.
+    block_size: int = 4800          # frames per callback (100 ms @ 48 kHz)
     channels: int = 1               # mono processing
     dtype: str = "float32"          # PCM format inside NumPy arrays
 

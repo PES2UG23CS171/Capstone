@@ -142,10 +142,11 @@ class TransientDetector:
         self,
         sr: int = SAMPLE_RATE,
         chunk: int = CHUNK_SIZE,
-        threshold_db: float = 6.0,
-        suppress_db: float = 40.0,
-        hold_ms: float = 350.0,
-        release_ms: float = 60.0,
+        threshold_db: float = 12.0,
+        suppress_db: float = 18.0,
+        hold_ms: float = 40.0,
+        release_ms: float = 80.0,
+        noise_floor_energy: float = 1e-4,
     ) -> None:
         self.sr = sr
         self.chunk = chunk
@@ -157,15 +158,24 @@ class TransientDetector:
         # Slow the slow envelope WAY down so gradual transients still trigger
         self.alpha_release = np.float32(1.0 - np.exp(-1.0 / (0.500 * sr)))
 
-        # Threshold in linear power ratio
-        self.threshold = np.float32(10.0 ** (threshold_db / 10.0))  # 6 dB → ~3.98
+        # Threshold in linear power ratio.  A transient must exceed the slow
+        # envelope by this much.  12 dB ≙ ~16× power — loud enough to clear
+        # ordinary speech onsets, which keeps the gate off normal voice.
+        self.threshold = np.float32(10.0 ** (threshold_db / 10.0))  # 12 dB → ~15.8
 
-        # Suppression gain (linear)
-        self.suppress_gain = np.float32(10.0 ** (-suppress_db / 20.0))  # -40 dB → 0.01
+        # Suppression gain (linear).  -18 dB attenuates the transient without
+        # punching a hole of silence into the surrounding speech.
+        self.suppress_gain = np.float32(10.0 ** (-suppress_db / 20.0))  # -18 dB → ~0.126
+
+        # Absolute energy gate: below this the slow envelope is treated as the
+        # noise floor instead of collapsing toward zero.  Without it, quiet
+        # passages make `es → 0` and the ratio test fires on every tiny
+        # fluctuation, gating speech to silence.
+        self.abs_floor = np.float32(noise_floor_energy)
 
         # Hold and ramp counters (in samples)
-        self.hold_samples    = int(hold_ms * sr / 1000.0)      # 350 ms → 16800 samples
-        self.release_samples = int(release_ms * sr / 1000.0)    # 60 ms → 2880 samples
+        self.hold_samples    = int(hold_ms * sr / 1000.0)      # 40 ms → 1920 samples
+        self.release_samples = int(release_ms * sr / 1000.0)    # 80 ms → 3840 samples
 
         # --- State (persists across chunks) ---
         self.env_fast = np.float32(0.0)
@@ -206,7 +216,11 @@ class TransientDetector:
             es = es + self.alpha_release * (e - es)
 
             # --- State machine ---
-            transient_now = (ef > self.threshold * max(es, 1e-12))
+            # Compare the fast envelope against the slow envelope, but never
+            # let the reference fall below the absolute noise floor — otherwise
+            # silence/quiet noise produces spurious detections.
+            ref = es if es > self.abs_floor else self.abs_floor
+            transient_now = (ef > self.threshold * ref)
 
             if transient_now:
                 # Transient onset / continuation
@@ -260,8 +274,8 @@ class NoiseEstimator:
         self,
         sr: int = SAMPLE_RATE,
         window_ms: float = 20.0,
-        beta: float = 8.0,
-        g_min: float = 0.01,
+        beta: float = 2.0,
+        g_min: float = 0.25,
         n_windows: int = 3,
     ) -> None:
         self.sr = sr
@@ -281,10 +295,10 @@ class NoiseEstimator:
         # Published noise floor estimate
         self.noise_floor = np.float32(1e-10)
 
-    def _update_floor(self, chunk_energy: float) -> None:
+    def _update_floor(self, chunk_energy: float, n_samples: int = CHUNK_SIZE) -> None:
         """Update the minimum-statistics state with the energy of a chunk."""
         self._acc_min = min(self._acc_min, chunk_energy)
-        self._acc_count += CHUNK_SIZE
+        self._acc_count += n_samples
 
         if self._acc_count >= self.window_samples:
             self._window_mins[self._win_idx % self.n_windows] = self._acc_min
@@ -297,7 +311,7 @@ class NoiseEstimator:
     def process(self, x: np.ndarray) -> np.ndarray:
         """Apply stationary noise suppression gain to chunk *x*."""
         sig_energy = np.float32(np.mean(x * x) + 1e-12)
-        self._update_floor(float(sig_energy))
+        self._update_floor(float(sig_energy), len(x))
 
         # Spectral-subtraction-style gain
         gain = max(1.0 - self.beta * self.noise_floor / sig_energy, self.g_min)

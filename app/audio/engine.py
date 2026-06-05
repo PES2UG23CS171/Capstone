@@ -46,16 +46,17 @@ from app.ipc.messages import (
     StatusPayload,
 )
 
-# Import RealTimeFilter from the PoC module at project root
+# Import the voiceiso StreamingPipeline (DeepFilterNet3 + full chain).
 try:
-    # Ensure project root is on path so poc_realtime_transient can be imported
+    # Ensure project root is on path so the voiceiso package is importable.
     _project_root = str(Path(__file__).resolve().parent.parent.parent)
     if _project_root not in sys.path:
         sys.path.insert(0, _project_root)
-    from poc_realtime_transient import RealTimeFilter
-    _HAS_REALTIME_FILTER = True
-except ImportError:
-    _HAS_REALTIME_FILTER = False
+    from voiceiso.config import PipelineConfig
+    from voiceiso.pipeline import StreamingPipeline
+    _HAS_PIPELINE = True
+except Exception:  # noqa: BLE001 — fall back gracefully if deps missing
+    _HAS_PIPELINE = False
 
 logger = logging.getLogger(__name__)
 
@@ -111,24 +112,18 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     peak_in: float = 0.0
     peak_out: float = 0.0
 
-    # ── Denoiser / RealTimeFilter ────────────────────────────────────────
-    rt_filter: Optional["RealTimeFilter"] = None
-    if _HAS_REALTIME_FILTER:
-        rt_filter = RealTimeFilter(sr=cfg.sample_rate, chunk=128, use_noise_est=True)
-        # Retune transient detector for live mic (defaults are for offline demo)
-        td = rt_filter.transient
-        td.threshold = np.float32(10.0 ** (20.0 / 10.0))       # 20 dB — only real impulses
-        td.suppress_gain = np.float32(10.0 ** (-15.0 / 20.0))  # -15 dB — gentle attenuation
-        td.hold_samples = int(25.0 * cfg.sample_rate / 1000.0)  # 25 ms hold
-        td.release_samples = int(30.0 * cfg.sample_rate / 1000.0)  # 30 ms ramp-up
-        td.alpha_release = np.float32(1.0 - np.exp(-1.0 / (0.050 * cfg.sample_rate)))  # faster slow env
-        # Retune noise estimator — gentle (max -8 dB cut, preserves voice)
-        ne = rt_filter.noise_est
-        ne.beta = np.float32(1.5)    # gentle subtraction (was 8.0)
-        ne.g_min = np.float32(0.4)   # never cut more than -8 dB (was 0.01 = -40 dB)
-        log.info("RealTimeFilter loaded — transient suppression active (live-tuned).")
-    else:
-        log.warning("RealTimeFilter not available — falling back to StubDenoiser.")
+    # ── voiceiso StreamingPipeline (DeepFilterNet3 + VAD + controller + …) ─
+    pipeline: Optional["StreamingPipeline"] = None
+    if _HAS_PIPELINE:
+        try:
+            pcfg = PipelineConfig(sample_rate=cfg.sample_rate, channels=cfg.channels)
+            pipeline = StreamingPipeline(pcfg, enh_threads=4)
+            log.info("voiceiso pipeline loaded — backends: %s", pipeline.backend_summary)
+        except Exception:
+            log.error("Failed to init voiceiso pipeline:\n%s", traceback.format_exc())
+            pipeline = None
+    if pipeline is None:
+        log.warning("voiceiso pipeline unavailable — falling back to StubDenoiser passthrough.")
 
     denoiser = StubDenoiser(
         model_path=cfg.model_path,
@@ -166,28 +161,21 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             current_rtf = 0.0
             return
 
-        if enabled and rt_filter is not None:
-            # Process through RealTimeFilter in 128-sample sub-chunks
+        if enabled and pipeline is not None:
+            # Run the whole block through the voiceiso pipeline (DFN3 + chain).
             mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
-            n = len(mono)
-            chunk_size = 128
-            i = 0
-            while i + chunk_size <= n:
-                mono[i:i + chunk_size] = rt_filter.process_chunk(mono[i:i + chunk_size])
-                i += chunk_size
-            # Process remainder
-            if i < n:
-                tail = np.zeros(chunk_size, dtype=np.float32)
-                tail[:n - i] = mono[i:]
-                processed_tail = rt_filter.process_chunk(tail)
-                mono[i:] = processed_tail[:n - i]
-            processed = mono[:, np.newaxis] if indata.ndim > 1 else mono
+            dry = mono.copy()
 
-            # Update RTF from profiler
-            if rt_filter.profiler._times:
-                last_t = rt_filter.profiler._times[-1]
-                budget = chunk_size / cfg.sample_rate
-                current_rtf = last_t / budget
+            t0 = time.perf_counter()
+            ctx = pipeline.process_block(mono)
+            wet = ctx.audio[: len(mono)]
+            budget = len(mono) / cfg.sample_rate
+            current_rtf = (time.perf_counter() - t0) / budget if budget > 0 else 0.0
+
+            # GUI "strength" slider = global wet/dry trim on top of the pipeline.
+            if strength < 1.0:
+                wet = strength * wet + (1.0 - strength) * dry[: len(wet)]
+            processed = wet
         elif enabled:
             processed = denoiser.process(indata[:, :cfg.channels].copy())
         else:
