@@ -17,10 +17,10 @@ class AppConfig:
 
     # ── Audio stream parameters ──────────────────────────────────────────
     sample_rate: int = 48_000
-    # 100 ms blocks: DeepFilterNet3's efficient operating point (RTF ≈ 0.13 vs
-    # 0.55 at 20 ms).  The voiceiso pipeline runs inline on the callback at
-    # ~21 ms work per 100 ms block — xrun-safe with margin.
-    block_size: int = 4800          # frames per callback (100 ms @ 48 kHz)
+    # 20 ms blocks: stateful DFN3 streaming — each call processes only new audio,
+    # GRU state carries temporal context, no context-buffer overhead.
+    # End-to-end latency ≈ 20–25 ms (vs 100 ms with the old overlap-save design).
+    block_size: int = 960           # frames per callback (20 ms @ 48 kHz)
     channels: int = 1               # mono processing
     dtype: str = "float32"          # PCM format inside NumPy arrays
 

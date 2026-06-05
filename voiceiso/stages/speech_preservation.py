@@ -67,9 +67,24 @@ class SpeechPreservation(Stage):
         consonant = float(max(fricative, plosive))
         self._prev_rms = rms
 
+        # ── Fused speech confidence (read downstream by Enhancement) ────
+        # Combines:
+        #   * VAD probability (continuous; primary signal)
+        #   * Consonant evidence (catches fricatives VAD nearly missed)
+        #   * Inverse of the competing-speech probability (high competing
+        #     prob → less confidence that THIS is target speech)
+        comp_prob = ctx.noise_probs.get("competing_speech", 0.0) if ctx.noise_probs else 0.0
+        speech_conf = (
+            0.65 * float(ctx.vad_prob)
+            + 0.25 * consonant
+            + 0.10 * (1.0 - float(comp_prob))
+        )
+        ctx.speech_conf = float(np.clip(speech_conf, 0.0, 1.0))
+
         if consonant >= self.detect_threshold:
             # Protect from the post-filter: keep speech state, ease residual gate.
             ctx.is_speech = True
             ctx.postfilter_strength *= (1.0 - 0.6 * consonant)
         ctx.meta["consonant"] = consonant
+        ctx.meta["speech_conf"] = ctx.speech_conf
         return ctx

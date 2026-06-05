@@ -1,27 +1,33 @@
 """
-Dynamic Suppression Controller (quality-first).
+Dynamic Suppression Controller — V2 (multi-band, multi-confidence).
 
-This is the heart of the "integrated system" novelty.  An earlier version tried
-to be clever — lowering DFN's strength to "protect" speech and per-class
-suppression targets.  Empirically that *hurt*: DFN preserves speech at corr 0.99
-and gives +16 dB SNR at full strength, so throttling it in noise only leaks
-noise back.  The corrected policy is therefore **quality-first**:
+V1 → V2 changes
+~~~~~~~~~~~~~~~
+* **Smooth SNR base.**  A continuous ``np.interp`` over SNR replaces the V1
+  3-tier ``if/elif`` (which had audible steps at 10 dB and 20 dB boundaries).
+* **VAD probability, not just is_speech.**  ``vad_prob`` continuously scales
+  the speech-protection floor, so 0.55-confidence frames are treated less
+  protectively than 0.99-confidence ones.
+* **Per-band gains.**  Outputs ``ctx.band_gain = (g_lo, g_md, g_hi)`` — the
+  controller's first multi-band capability.  Driven by:
+    – noise class (fan → cut LF; keyboard → cut HF; …)
+    – target-speaker similarity (competing speech → cut mid)
+    – per-band residual-echo coherence from the AEC (echo leakage → cut that band)
+* **Over-suppression rollback** is now handled inside the Enhancement stage
+  itself (it has direct access to both dry and wet, and to its own DFN call)
+  so the rollback applies on the very same frame the artifact is detected.
+  This controller does not need to coordinate it.
+* **Per-class release times** for transients (unchanged from V1.5).
+* **Leaky clean-run counter.**  A single bad frame no longer fully resets the
+  400 ms sustained-clean hold.
 
-* **Default to full enhancement** whenever any noise/speech-in-noise is present.
-  DFN is trusted; we do not blend dry noise back.
-* **Bypass only when confidently, *sustainedly* clean** (high SNR + "clean"
-  class for several consecutive frames).  This saves CPU and avoids processing
-  already-clean audio — without risking noise leakage from a single
-  misclassified frame.
-* **Per-class nuance drives the post-filter, not DFN's strength.**  The noise
-  class and SNR set ``postfilter_strength`` (residual cleanup + comfort-noise
-  behaviour), where being wrong is harmless, instead of throttling the network.
+Inputs:  ``ctx.vad_prob``, ``ctx.speech_conf``, ``ctx.snr_db``, ``ctx.noise_class``,
+         ``ctx.noise_probs``, ``ctx.target_speaker_sim``, ``ctx.res_band``,
+         ``ctx.meta['competing_cut']``.
 
-Inputs: VAD confidence, noise class, SNR, environment.
-Outputs: ``ctx.suppression`` (→ DFN atten cap / bypass) and
-``ctx.postfilter_strength``.
-
-Transparent + CPU-free; swappable for a learned policy behind the same API.
+Outputs: ``ctx.suppression`` (→ DFN atten cap),
+         ``ctx.band_gain`` (→ MultiBandGainModulator),
+         ``ctx.postfilter_strength`` (→ PostFilter).
 """
 
 from __future__ import annotations
@@ -31,12 +37,45 @@ import numpy as np
 from voiceiso.config import PipelineConfig
 from voiceiso.stages.base import FrameContext, Stage
 
-# Per-class POST-FILTER weight (residual cleanup aggressiveness in gaps).
-# Higher for noise types whose residual is most annoying (tonal/speech-like).
+# Per-class suppression modifier (1.0 = base; <1.0 = softer; relative to SNR base).
+_CLASS_SUPP_MODIFIER = {
+    "clean": 0.0,
+    "fan": 1.0, "hvac": 1.0,
+    "traffic": 0.9, "wind": 0.9,
+    "music": 1.0, "television": 1.0,
+    "competing_speech": 0.95,
+    "keyboard": 0.7,
+    "mouse_click": 0.65,
+    "dog_bark": 0.65,
+    "door_slam": 0.6,
+}
+
 _CLASS_POSTFILTER = {
     "clean": 0.0, "fan": 0.4, "hvac": 0.4, "traffic": 0.6, "wind": 0.7,
     "keyboard": 0.5, "mouse_click": 0.5, "dog_bark": 0.6, "door_slam": 0.6,
     "music": 0.8, "television": 0.8, "competing_speech": 0.9,
+}
+
+_CLASS_RELEASE_MS = {
+    "keyboard": 50.0, "mouse_click": 50.0,
+    "dog_bark": 60.0, "door_slam": 60.0,
+}
+
+# Per-band gain hints by noise class.  Multiplicative, applied AFTER DFN3.
+# (lo, md, hi) — 1.0 = no extra attenuation in that band.
+_CLASS_BAND_GAIN = {
+    "clean":           (1.00, 1.00, 1.00),
+    "fan":             (0.50, 1.00, 1.00),   # extra LF cleanup
+    "hvac":            (0.55, 1.00, 1.00),
+    "wind":            (0.30, 1.00, 1.00),
+    "traffic":         (0.70, 1.00, 0.90),
+    "keyboard":        (1.00, 1.00, 0.40),   # extra HF cleanup
+    "mouse_click":     (1.00, 1.00, 0.50),
+    "dog_bark":        (1.00, 0.85, 0.85),
+    "door_slam":       (0.70, 1.00, 1.00),
+    "music":           (1.00, 0.80, 0.90),
+    "television":      (1.00, 0.75, 0.90),
+    "competing_speech":(1.00, 0.40, 1.00),   # cut mid (speech band)
 }
 
 
@@ -48,42 +87,114 @@ class DynamicController(Stage):
         self.cfg = cfg
         self._supp = cfg.supp_max
         self._a_attack = 1.0 - np.exp(-cfg.hop_ms / max(cfg.supp_attack_ms, 1e-3))
-        self._a_release = 1.0 - np.exp(-cfg.hop_ms / max(cfg.supp_release_ms, 1e-3))
         self._clean_snr = clean_snr_db
-        self._clean_run = 0
-        # Frames of sustained-clean required before we trust a bypass.
+        # Leaky clean counter: increments on clean frames, decays slowly on noisy.
+        self._clean_run = 0.0
         self._clean_needed = max(1, int(clean_hold_ms / max(cfg.hop_ms, 1.0)))
 
     def reset(self) -> None:
         self._supp = self.cfg.supp_max
-        self._clean_run = 0
+        self._clean_run = 0.0
+
+    @staticmethod
+    def _smooth_snr_base(snr_db: float) -> float:
+        """Continuous SNR-to-base mapping (replaces V1's 3-tier step function).
+
+            SNR ≤  0 dB → base = 1.00 (heavy noise → full DFN)
+            SNR ≈ 10 dB → base = 0.80
+            SNR ≈ 20 dB → base = 0.50 (residuals only)
+            SNR ≥ 30 dB → base = 0.20
+        """
+        return float(np.interp(snr_db,
+                               [0.0, 10.0, 20.0, 30.0],
+                               [1.00, 0.80, 0.50, 0.20]))
+
+    def _compute_target(self, ctx: FrameContext) -> float:
+        """Return the desired suppression ∈ [supp_min, supp_max]."""
+        if self._clean_run >= self._clean_needed:
+            return self.cfg.supp_min          # sustained clean → bypass
+
+        base = self._smooth_snr_base(ctx.snr_db)
+
+        # Classifier confidence: low confidence → don't over-commit.
+        top_prob = ctx.noise_conf if ctx.noise_conf > 0.0 else (
+            max(ctx.noise_probs.values()) if ctx.noise_probs else 0.5
+        )
+        conf_scale = float(np.interp(top_prob, [0.3, 0.9], [0.7, 1.0]))
+
+        modifier = _CLASS_SUPP_MODIFIER.get(ctx.noise_class, 0.85)
+
+        # Speech-protection floor: when vad_prob is high, never go above 0.92
+        # (so DFN's atten cap never reaches the most aggressive end of the range
+        # while we are confident speech is active).
+        speech_cap = float(np.interp(ctx.vad_prob, [0.4, 0.9], [1.0, 0.92]))
+
+        return float(np.clip(base * modifier * conf_scale,
+                             self.cfg.supp_min,
+                             min(self.cfg.supp_max, speech_cap)))
+
+    def _compute_band_gains(self, ctx: FrameContext) -> tuple[float, float, float]:
+        """Per-band gain modulation applied AFTER DFN3."""
+        g_lo, g_md, g_hi = _CLASS_BAND_GAIN.get(ctx.noise_class, (1.0, 1.0, 1.0))
+
+        # Competing speech: deeper mid-band cut when the embedder has a real
+        # similarity score and it's well below threshold.
+        cut = float(ctx.meta.get("competing_cut", 0.0))
+        if cut > 0.0:
+            # Interpolate g_md from current toward 0.10 by cut strength.
+            g_md = float(g_md * (1.0 - cut) + 0.10 * cut)
+
+        # Residual-echo cleanup: bands with high coherence get extra attenuation.
+        if ctx.dt_active or any(c > 0.3 for c in ctx.res_band):
+            res_lo, res_md, res_hi = ctx.res_band
+            g_lo *= float(np.interp(res_lo, [0.3, 0.7], [1.0, 0.4]))
+            g_md *= float(np.interp(res_md, [0.3, 0.7], [1.0, 0.5]))
+            g_hi *= float(np.interp(res_hi, [0.3, 0.7], [1.0, 0.5]))
+
+        # Speech protection in LF / HF.  Voice fundamentals live at 80–250 Hz;
+        # fricatives at >4 kHz.  Never cut these >6 dB (g >= 0.5) during speech.
+        if ctx.vad_prob >= 0.6:
+            g_lo = max(g_lo, 0.5)
+            g_hi = max(g_hi, 0.5)
+
+        return (
+            float(np.clip(g_lo, 0.05, 1.0)),
+            float(np.clip(g_md, 0.05, 1.0)),
+            float(np.clip(g_hi, 0.05, 1.0)),
+        )
 
     def process(self, ctx: FrameContext) -> FrameContext:
         cfg = self.cfg
 
-        # Sustained-clean detector: high SNR, no speech, "clean" class.
+        # ── Leaky clean-run counter ──────────────────────────────────────
         confidently_clean = (
             (not ctx.is_speech)
             and ctx.snr_db >= self._clean_snr
             and ctx.noise_class == "clean"
         )
-        self._clean_run = self._clean_run + 1 if confidently_clean else 0
-
-        # Target: bypass only after a sustained clean run; otherwise full DFN.
-        if self._clean_run >= self._clean_needed:
-            target = cfg.supp_min          # → enhancement bypass (passthrough)
+        if confidently_clean:
+            self._clean_run += 1.0
         else:
-            target = cfg.supp_max          # → full enhancement (trust DFN)
+            # Decay (not reset): a single flicker doesn't kill the hold.
+            self._clean_run = max(0.0, self._clean_run - 2.0)
 
-        # Attack/release smoothing (rise fast, fall slow → no pumping/chopping).
-        a = self._a_attack if target > self._supp else self._a_release
+        target = self._compute_target(ctx)
+
+        # ── Attack / per-class release smoothing ─────────────────────────
+        release_ms = _CLASS_RELEASE_MS.get(ctx.noise_class, cfg.supp_release_ms)
+        a_release = 1.0 - np.exp(-cfg.hop_ms / max(release_ms, 1e-3))
+        a = self._a_attack if target > self._supp else a_release
         self._supp += a * (target - self._supp)
         ctx.suppression = float(np.clip(self._supp, cfg.supp_min, cfg.supp_max))
 
-        # Post-filter aggressiveness: per-class, scaled down at high SNR.
+        # ── Post-filter aggressiveness ───────────────────────────────────
         pf = _CLASS_POSTFILTER.get(ctx.noise_class, 0.5)
         snr_scale = float(np.interp(ctx.snr_db, [0.0, 25.0], [1.0, 0.3]))
         ctx.postfilter_strength = float(np.clip(pf * snr_scale, 0.0, 1.0))
+
+        # ── Per-band gains ───────────────────────────────────────────────
+        ctx.band_gain = self._compute_band_gains(ctx)
+
         ctx.meta["ctrl_target"] = target
         ctx.meta["clean_run"] = self._clean_run
         return ctx

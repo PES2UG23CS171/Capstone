@@ -51,8 +51,13 @@ class VAD(Stage):
         self.vsr = cfg.vad_sample_rate
         self.win = cfg.vad_window
         self.threshold = cfg.vad_speech_threshold
-        self._hangover_frames = int(cfg.vad_hangover_ms / cfg.hop_ms)
-        self._hang = 0
+        # Hangover length in SAMPLES at the pipeline sample rate.  We decrement
+        # by the actual block length each call, so the realised hangover is in
+        # milliseconds regardless of the caller's block size.  (V1 stored
+        # hop-count and decremented once per call, which doubled the realised
+        # hangover whenever the block was longer than one hop — the default.)
+        self._hangover_samples_total = int(cfg.sample_rate * cfg.vad_hangover_ms / 1000.0)
+        self._hang_samples = 0
         self._buf = np.zeros(0, dtype=np.float32)   # accumulates 16 kHz samples
         self._last_prob = 0.0
         self.backend = "none"
@@ -67,7 +72,7 @@ class VAD(Stage):
             self._noise = 1e-4
 
     def reset(self) -> None:
-        self._hang = 0
+        self._hang_samples = 0
         self._buf = np.zeros(0, dtype=np.float32)
         self._last_prob = 0.0
         if self.backend == "silero" and hasattr(self._model, "reset_states"):
@@ -96,13 +101,16 @@ class VAD(Stage):
     def process(self, ctx: FrameContext) -> FrameContext:
         prob = self._silero_prob(ctx.audio) if self.backend == "silero" else self._energy_prob(ctx.audio)
         ctx.vad_prob = prob
+        block_samples = len(ctx.audio)
 
         if prob >= self.threshold:
-            self._hang = self._hangover_frames
+            self._hang_samples = self._hangover_samples_total
             ctx.is_speech = True
         else:
-            if self._hang > 0:
-                self._hang -= 1
+            if self._hang_samples > 0:
+                # Decrement by ACTUAL block length so the realised hangover is
+                # always vad_hangover_ms regardless of the caller's block size.
+                self._hang_samples = max(0, self._hang_samples - block_samples)
                 ctx.is_speech = True       # hangover: don't chop word tails
             else:
                 ctx.is_speech = False
