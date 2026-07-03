@@ -1,35 +1,43 @@
 """
-TinyGRUPostFilter — learned per-bin spectral cleanup after DFN3.
+Learned per-bin spectral cleanup after DFN3.
 
-DFN3 leaves the most audible residuals on music, TV speech, and competing
+DFN3 leaves its most audible residuals on music, TV speech, and competing
 speech — categories where the noise has tonal/harmonic structure.  A small
-GRU operating on log-mel features + class one-hot can learn to mask these
-residuals far better than the rule-based residual gate in
-:class:`PostFilter`.
+learned post-filter conditioned on log-mel features + the noise-class
+one-hot + suppression context can mask those residuals far better than the
+rule-based residual gate in :class:`PostFilter`.
 
-Architecture (target):
-    Input  : log-mel(64) + noise_class_one_hot(12) + suppression(1) + erle_db(1)
-             = 78-dim feature vector per frame
-    GRU    : hidden=120, 1 layer  → ≈84k params
-    FC     : 120 → 481  (rFFT bins of 960-sample window @ 48 kHz)
-    Output : sigmoid → per-bin gain mask in [0, 1]
-    Apply  : STFT(wet) · mask → ISTFT → output
+Recommended architecture for the checkpoint (~120k params, target):
 
-Total ≈ 96k params, INT8 ONNX ≈ 120 KB on disk / ~0.5 MB resident.
-CPU ≈ 1.4 ms / 20 ms block, latency ≈ 0 added (operates on the STFT we already
-take for the over-suppression detector + classifier features).
+    Input:  log-mel(64) + noise_class_one_hot(12) + suppression(1) + erle_db(1)
+            = 78-dim feature vector per frame
+    Conv1d: kernel=5, causal, channels 78 → 64
+    Conv1d: kernel=5, dilation=2, causal, 64 → 64
+    Conv1d: kernel=5, dilation=4, causal, 64 → 64   (receptive field 31 frames)
+    GRU:    hidden=96, 1 layer
+    FC:     96 → 481 rFFT bins of 960-sample window @ 48 kHz
+    Output: sigmoid → per-bin gain mask in [0, 1]
 
-**This file is a scaffold.**  No checkpoint ships with the repo, so:
+The Conv-GRU front-end captures local spectral patterns (musical-noise blobs
+span 3–10 mel bins; pure-GRU on raw mel struggles with that), and the GRU
+back-end carries multi-second temporal memory for class continuity.  Pure
+1-layer GRU also works — same I/O shape, slightly weaker on music.
 
-* When ``cfg.postfilter_model_path`` is unset or the file is missing: this
-  stage is a complete passthrough (no compute, no allocation).
-* When a checkpoint exists and ``onnxruntime`` is installed: the stage runs
-  the GRU mask.  Training is documented separately
-  (see ``scripts/train_tiny_postfilter.py``, not shipped here).
+Cost (Conv-GRU, INT8): ≈ 150 KB on disk / ≈ 0.6 MB resident, ~1.8 ms per
+20 ms block.  Latency: 0 added (causal convolutions; operates on the STFT
+we already compute).
 
-Bypass policy: even with a checkpoint loaded, this stage skips frames where
+**This file is a scaffold.**  No checkpoint ships with the repo:
+
+* ``cfg.postfilter_model_path`` unset or missing → passthrough.
+* Checkpoint present and ``onnxruntime`` installed → mask is applied.
+  ANY ONNX model with the documented I/O contract works; Conv-GRU is the
+  recommended choice but the stage doesn't depend on a specific architecture.
+
+Bypass policy (always active): even with a checkpoint loaded, frames where
 DFN3 already does well (``clean``/``fan``/``hvac``/``traffic`` classes, or
-``suppression < 0.3``) so it cannot make a good frame worse.
+``suppression < 0.3``) are skipped — the learned post-filter only earns its
+keep on hard tonal/competing-speech residuals.
 """
 
 from __future__ import annotations

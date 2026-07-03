@@ -1,11 +1,14 @@
 """
 Live audio streaming: microphone → pipeline → speakers.
 
-Uses 20 ms blocks for ~20 ms end-to-end latency.  DFN3's GRU state is maintained
-across blocks (stateful streaming), so each call only processes the new 20 ms
-chunk — no context buffer overhead.  Because enhancement must not run on the
+Uses 100 ms blocks — DFN3's efficient design point.  DFN3 does NOT persist GRU
+state across calls (its ``_state`` keeps only STFT/ERB analysis state; see
+stages/enhancement.py), so per-call temporal context is limited to the STFT
+frames inside the block; at 20 ms (≈1–2 frames) measured SI-SDRi is negative,
+at 100 ms it is clearly positive.  Because enhancement must not run on the
 real-time audio callback thread, audio is shuttled through queues to a worker
-thread; the callback only does lock-free enqueue/dequeue.
+thread; the callback only does lock-free enqueue/dequeue.  End-to-end latency
+≈ block + one queue hop + compute (~200 ms).
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ except Exception:  # pragma: no cover
 
 
 class LiveStream:
-    def __init__(self, cfg: Optional[PipelineConfig] = None, block_ms: float = 20.0,
+    def __init__(self, cfg: Optional[PipelineConfig] = None, block_ms: float = 100.0,
                  enh_threads: int = 4) -> None:
         if sd is None:
             raise ImportError("sounddevice is required for LiveStream")

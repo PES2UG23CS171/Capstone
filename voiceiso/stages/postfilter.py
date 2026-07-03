@@ -83,19 +83,30 @@ class PostFilter(Stage):
         self._cn_zi = np.zeros(max(len(a), len(b)) - 1, dtype=np.float64)
         self._cn_filter_class = noise_class
 
-    def _comfort_noise(self, n: int, noise_floor_db: float) -> np.ndarray:
-        """Generate ``n`` samples of class-shaped, level-adapted comfort noise."""
-        self._select_cn_filter(self._cn_filter_class)  # ensure consistent state
+    def _comfort_noise(self, n: int, noise_floor_db: float, echo_boost_db: float = 0.0) -> np.ndarray:
+        """Generate ``n`` samples of class-shaped, level-adapted comfort noise.
+
+        ``echo_boost_db`` lifts the CN level during DT-suppressed gaps so the
+        listener doesn't perceive the AEC + NLES kill-zone as a dropped call.
+        Default 0 (no boost) for the regular non-speech residual case.
+        """
         white = self._rng.standard_normal(n)
         cn, self._cn_zi = lfilter(self._cn_b, self._cn_a, white, zi=self._cn_zi)
         cn = cn.astype(np.float32)
         rms = float(np.sqrt(np.mean(cn * cn)) + 1e-9)
         cn /= np.float32(rms)
-        # Level: 10 dB above the running noise floor, capped at comfort_noise_db.
+        # Base level: 10 dB above the running noise floor, capped at comfort_noise_db.
+        # Echo boost is added ON TOP, but still bounded by the configured cap
+        # (+ the echo boost itself if echo mode is engaged).
         target_db = min(noise_floor_db + 10.0, self.cfg.comfort_noise_db)
+        target_db += echo_boost_db
+        # Allow the boost to push slightly above the default ceiling — capped
+        # at comfort_noise_db + cn_echo_boost_db so it can't run away.
+        ceiling_db = self.cfg.comfort_noise_db + self.cfg.cn_echo_boost_db
+        target_db = min(target_db, ceiling_db)
         target_lin = 10.0 ** (target_db / 20.0)
-        # Hard upper bound so a stale / bogus noise-floor estimate can't push CN loud.
-        target_lin = float(np.clip(target_lin, 0.0, self._cn_lin_max))
+        ceiling_lin = 10.0 ** (ceiling_db / 20.0)
+        target_lin = float(np.clip(target_lin, 0.0, ceiling_lin))
         return cn * np.float32(target_lin)
 
     @staticmethod
@@ -127,9 +138,25 @@ class PostFilter(Stage):
             g = 1.0 - ctx.postfilter_strength * (1.0 - self._floor_lin)
             x = x * np.float32(g)
 
-        # 2. Class-shaped, level-adapted comfort noise.
+        # 2. Class-shaped, level-adapted comfort noise.  Boost the level when
+        #    AEC + NLES are aggressively suppressing echo (echo_conf high) and
+        #    the frame isn't dominated by near-end speech (vad_prob low).  The
+        #    boosted CN masks the otherwise-unnatural silence that aggressive
+        #    DT suppression creates, preventing the "dropped call" perception.
         noise_floor_db = float(ctx.meta.get("noise_floor_db", -60.0))
-        cn = self._comfort_noise(n, noise_floor_db)
+        echo_boost_db = 0.0
+        if (ctx.echo_conf > self.cfg.echo_conf_threshold
+                and ctx.vad_prob < 0.4):
+            # Scale boost linearly from 0 at threshold up to cn_echo_boost_db at 1.0.
+            scale = float(np.clip(
+                (ctx.echo_conf - self.cfg.echo_conf_threshold)
+                / max(1.0 - self.cfg.echo_conf_threshold, 1e-3),
+                0.0, 1.0,
+            ))
+            echo_boost_db = scale * float(self.cfg.cn_echo_boost_db)
+        cn = self._comfort_noise(n, noise_floor_db, echo_boost_db=echo_boost_db)
+        if echo_boost_db > 0.0:
+            ctx.meta["cn_echo_boost_db"] = echo_boost_db
         y = x + cn
 
         # 3. Soft limit (prevents accidental overshoot from the band modulator

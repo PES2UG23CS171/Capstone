@@ -34,13 +34,23 @@ import os
 from pathlib import Path
 
 # ── macOS: Virtual environment GUI fix ───────────────────────────────
-# A standard venv python executable on macOS lacks the Bundle ID context 
-# required by AppKit/Cocoa, which causes PyQt6 to fatally crash the app.
+# A standard venv python executable on macOS lacks the Bundle ID context
+# required by AppKit/Cocoa, which causes PyQt6 to fatally crash the app.  The
+# workaround re-execs through the framework (base) interpreter — BUT that
+# interpreter does not see the venv's site-packages, which would silently strip
+# deepfilternet/onnxruntime and drop the whole pipeline to passthrough.  So we
+# explicitly carry the current venv's site-packages (and the repo root) into
+# PYTHONPATH before re-exec so every heavy import still resolves.
 if sys.platform == "darwin" and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable:
-    current_pythonpath = os.environ.get("PYTHONPATH", "")
-    if os.getcwd() not in current_pythonpath.split(":"):
-        os.environ["PYTHONPATH"] = f"{os.getcwd()}:{current_pythonpath}".strip(":")
-    
+    import sysconfig
+
+    repo_root_path = str(Path(__file__).resolve().parent.parent)
+    venv_site = [sysconfig.get_path("purelib"), sysconfig.get_path("platlib")]
+    want = [repo_root_path] + [p for p in venv_site if p]
+    existing = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    merged = want + [p for p in existing if p not in want]
+    os.environ["PYTHONPATH"] = os.pathsep.join(merged)
+
     # Preserve -m module resolution behaviour
     if len(sys.argv) > 0 and 'app/main.py' in sys.argv[0]:
         args = ["-m", "app.main"] + sys.argv[1:]

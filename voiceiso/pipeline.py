@@ -6,13 +6,14 @@ V2 order::
     mic block
       → Preprocessing            (DC/rumble removal, SNR estimate)
       → AEC                       (echo cancel + DTD + RES coherence flags)
-      → VAD                       (speech probability + hangover)
+      → VAD                       (adaptive threshold + adaptive hangover)
       → SpeakerEmbedder           (target-speaker cosine similarity)
       → NoiseClassifier           (what kind of noise?)
       → CompetingSpeech           (consume sim → mid-band cut hint)
       → DynamicController         (suppression + per-band gains)
-      → SpeechPreservation        (consonant cues + fused speech_conf)
-      → Enhancement (DFN3)        (the heavy lifting + over-suppression rollback)
+      → SpeechPreservation        (consonants + pitch voicing + sticky speech_conf)
+      → Enhancement (DFN3)        (heavy lifting + multi-cue per-band rollback)
+      → TargetSpeakerMask         (VoiceFilter-Lite — passthrough w/o ckpt+enroll)
       → MultiBandGainModulator    (per-band gain applied AFTER DFN3)
       → TinyGRUPostFilter         (learned residual cleanup — passthrough w/o ckpt)
       → PostFilter                (residual gate + class-shaped comfort noise)
@@ -24,9 +25,12 @@ streaming state, so feeding consecutive blocks is real-time-safe.
 
 from __future__ import annotations
 
+import logging
 from typing import List, Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from voiceiso.config import PipelineConfig
 from voiceiso.stages.aec import AEC
@@ -35,11 +39,15 @@ from voiceiso.stages.competing_speech import CompetingSpeech
 from voiceiso.stages.controller import DynamicController
 from voiceiso.stages.enhancement import Enhancement
 from voiceiso.stages.multiband import MultiBandGainModulator
-from voiceiso.stages.noise_classifier import HeuristicNoiseClassifier
+from voiceiso.stages.noise_classifier import (
+    EfficientATNoiseClassifier,
+    HeuristicNoiseClassifier,
+)
 from voiceiso.stages.postfilter import PostFilter
 from voiceiso.stages.preprocessing import Preprocessing
 from voiceiso.stages.speaker_embedder import SpeakerEmbedder
 from voiceiso.stages.speech_preservation import SpeechPreservation
+from voiceiso.stages.target_speaker_mask import TargetSpeakerMask
 from voiceiso.stages.tiny_postfilter import TinyGRUPostFilter
 from voiceiso.stages.vad import VAD
 
@@ -51,11 +59,39 @@ class StreamingPipeline:
         self.aec = AEC(self.cfg)
         self.vad = VAD(self.cfg)
         self.speaker_embedder = SpeakerEmbedder(self.cfg)
-        self.classifier = HeuristicNoiseClassifier(self.cfg)
+        # Primary classifier: learned EfficientAT-S when a checkpoint is
+        # available and onnxruntime is installed.  Fall back to the
+        # heuristic classifier transparently — same downstream contract.
+        # Catch ``Exception`` (not just RuntimeError) because
+        # ``onnxruntime`` raises its own custom exception classes
+        # (InvalidProtobuf, InvalidGraph, NoSuchFile, …) that inherit
+        # from Exception directly, not RuntimeError.  A corrupted or
+        # schema-mismatched ONNX file would otherwise crash
+        # StreamingPipeline construction.
+        self.classifier_fallback_reason: Optional[str] = None
+        try:
+            self.classifier: Stage = EfficientATNoiseClassifier(self.cfg)
+            self.classifier_backend = "efficientat"
+            logger.info(
+                "noise classifier: EfficientAT (learned) — %s",
+                self.cfg.noise_classifier_model_path,
+            )
+        except Exception as exc:
+            self.classifier = HeuristicNoiseClassifier(self.cfg)
+            self.classifier_backend = "heuristic"
+            self.classifier_fallback_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "noise classifier: FALLING BACK to heuristic — the learned "
+                "EfficientAT path is unavailable (%s). Set "
+                "cfg.noise_classifier_model_path to a valid head ONNX and "
+                "install onnxruntime to enable it.",
+                self.classifier_fallback_reason,
+            )
         self.competing = CompetingSpeech(self.cfg)
         self.controller = DynamicController(self.cfg)
         self.preservation = SpeechPreservation(self.cfg)
         self.enhancement = Enhancement(self.cfg, threads=enh_threads)
+        self.target_speaker_mask = TargetSpeakerMask(self.cfg)
         self.multiband = MultiBandGainModulator(self.cfg)
         self.tiny_postfilter = TinyGRUPostFilter(self.cfg)
         self.postfilter = PostFilter(self.cfg)
@@ -70,6 +106,7 @@ class StreamingPipeline:
             self.controller,
             self.preservation,
             self.enhancement,
+            self.target_speaker_mask,
             self.multiband,
             self.tiny_postfilter,
             self.postfilter,
@@ -81,7 +118,10 @@ class StreamingPipeline:
             "vad": self.vad.backend,
             "enhancement": self.enhancement.backend,
             "speaker_embedder": self.speaker_embedder.backend,
+            "target_speaker_mask": self.target_speaker_mask.backend,
             "tiny_postfilter": self.tiny_postfilter.backend,
+            "noise_classifier": self.classifier_backend,
+            "noise_classifier_fallback": self.classifier_fallback_reason,
             "aec_enabled": self.aec.enabled,
             "algorithmic_latency_ms": round(self.cfg.algorithmic_latency_ms, 1),
         }
@@ -100,6 +140,10 @@ class StreamingPipeline:
         )
         for stage in self.stages:
             ctx = stage(ctx)
+        # Feedback hook: the Preprocessing stage uses the previous frame's
+        # noise_class to pick its HP cutoff (default 25 Hz, or 80 Hz under
+        # wind).  Pipeline writes back here so the next block sees the hint.
+        self.preprocessing.set_prev_noise_class(ctx.noise_class)
         return ctx
 
     def process_signal(self, x: np.ndarray, block: Optional[int] = None) -> np.ndarray:

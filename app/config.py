@@ -17,10 +17,13 @@ class AppConfig:
 
     # ── Audio stream parameters ──────────────────────────────────────────
     sample_rate: int = 48_000
-    # 20 ms blocks: stateful DFN3 streaming — each call processes only new audio,
-    # GRU state carries temporal context, no context-buffer overhead.
-    # End-to-end latency ≈ 20–25 ms (vs 100 ms with the old overlap-save design).
-    block_size: int = 960           # frames per callback (20 ms @ 48 kHz)
+    # 100 ms blocks: DFN3's efficient design point.  DFN3 has NO cross-call GRU
+    # memory, so per-call temporal context = the STFT frames in the block; at
+    # 20 ms (≈1–2 frames) measured SI-SDRi is negative, at 100 ms it is +4 dB on
+    # the worst-case white-noise condition.  The engine runs the chain on a
+    # worker thread (not the audio callback), so a 100 ms block is xrun-safe.
+    # End-to-end latency ≈ block + one queue hop + compute (~200 ms).
+    block_size: int = 4800          # frames per callback (100 ms @ 48 kHz)
     channels: int = 1               # mono processing
     dtype: str = "float32"          # PCM format inside NumPy arrays
 
