@@ -10,6 +10,13 @@ deepfilternet>=0.5.6
 # Voice activity detection
 silero-vad>=6.0
 
+# ONNX runtime — REQUIRED for the learned EfficientAT noise classifier, the
+# Silero VAD ONNX path, DNSMOS, and the (optional) ECAPA / tiny-GRU stages.
+# silero-vad only pulls this via its optional [onnx-cpu] extra, so declare it
+# explicitly — otherwise a clean clone silently falls back to the heuristic.
+onnxruntime>=1.16
+onnx>=1.14           # reading model metadata / input shapes
+
 # Acoustic echo cancellation reference (optional, native build):
 #   webrtc-audio-processing  — WebRTC APM (AEC3/AGC/NS).  The pure-numpy PBFDAF
 #   in voiceiso/stages/aec.py needs no native deps and is the default.

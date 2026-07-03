@@ -63,13 +63,15 @@ class SpeakerEmbedder(Stage):
         self.cfg = cfg
         self.sr = cfg.sample_rate
         self.window_samples_16k = int(16000 * cfg.speaker_window_ms / 1000.0)
-        self.update_blocks = max(1, int(cfg.speaker_update_ms / max(cfg.hop_ms, 1.0)))
+        # Cadence tracked in milliseconds of input audio (not process() calls)
+        # so it's robust to varying caller block sizes (20 ms live vs 100 ms bench).
+        self.update_ms = float(cfg.speaker_update_ms)
         self.backend = "passthrough"
 
         self._session: Optional["ort.InferenceSession"] = None
         self._enrolled: Optional[np.ndarray] = None
         self._buf16k = np.zeros(0, dtype=np.float32)
-        self._blocks_since_update = 0
+        self._ms_since_update = 0.0
         self._last_sim = 1.0          # default: treat as target speaker
 
         if _HAS_ORT and cfg.speaker_model_path and Path(cfg.speaker_model_path).exists():
@@ -95,7 +97,7 @@ class SpeakerEmbedder(Stage):
 
     def reset(self) -> None:
         self._buf16k = np.zeros(0, dtype=np.float32)
-        self._blocks_since_update = 0
+        self._ms_since_update = 0.0
         self._last_sim = 1.0
 
     # ── enrollment API (used by the desktop app's "Calibrate" button) ────
@@ -130,20 +132,25 @@ class SpeakerEmbedder(Stage):
             ctx.target_speaker_sim = 1.0
             return ctx
 
-        # Only buffer VOICED audio.  ECAPA's similarity to the enrolled vector
-        # collapses on silence/noise windows — including those frames in the
-        # 200 ms window biases sim downward and causes CompetingSpeech to
-        # mis-flag the target speaker as a competing one.  Gate on the VAD
-        # output which has already run by this point in the pipeline.
-        if ctx.is_speech or ctx.vad_prob >= 0.4:
+        # Only buffer VOICED audio that's NOT echo-contaminated and NOT
+        # during AEC calibration (where ctx.audio is the raw echo-laden mic
+        # while echo_conf hasn't yet been computed).  Three gates:
+        #   1. VAD-positive (real voice present)
+        #   2. echo_conf below threshold (not leaked far-end speech)
+        #   3. AEC not calibrating (raw mic flowing through)
+        calibrating = float(ctx.meta.get("aec_calibrating", 0.0)) >= 0.5
+        echo_clean = ctx.echo_conf < self.cfg.echo_conf_threshold
+        voice_present = ctx.is_speech or ctx.vad_prob >= 0.4
+        block_ms = 1000.0 * len(ctx.audio) / max(self.sr, 1)
+        if voice_present and echo_clean and not calibrating:
             self._buf16k = np.concatenate([self._buf16k, _resample_to_16k(ctx.audio, self.sr)])
             if len(self._buf16k) > self.window_samples_16k * 2:
                 self._buf16k = self._buf16k[-self.window_samples_16k:]
-        self._blocks_since_update += 1
+        self._ms_since_update += block_ms
 
-        if (self._blocks_since_update >= self.update_blocks and
+        if (self._ms_since_update >= self.update_ms and
                 len(self._buf16k) >= self.window_samples_16k):
-            self._blocks_since_update = 0
+            self._ms_since_update = 0.0
             try:
                 emb = self._infer(self._buf16k[-self.window_samples_16k:])
                 n = np.linalg.norm(emb)

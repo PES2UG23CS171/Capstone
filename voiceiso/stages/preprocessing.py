@@ -29,30 +29,81 @@ class Preprocessing(Stage):
     def __init__(self, cfg: PipelineConfig, highpass_hz: float = 25.0) -> None:
         self.cfg = cfg
         self.sr = cfg.sample_rate
-        # Gentle 1st-order DC/subsonic blocker — transparent to speech.
-        self._sos = butter(1, highpass_hz / (self.sr / 2.0), btype="high", output="sos")
-        # State initialised to zero (not steady-state-for-unit-input).
-        # ``sosfilt_zi`` returns the state that produces zero output for a
-        # constant-1.0 input — applied to a real signal that starts near zero,
-        # that initial state causes a huge transient at sample 0 that can
-        # saturate the post-filter's soft-limit knee for the first ~100 ms.
-        # Zero state gives a clean ramp-up instead.
+        # Two pre-built 1st-order Butterworth high-pass filters:
+        #   * default  — 25 Hz (transparent to speech)
+        #   * wind     — 80 Hz (configurable via cfg.wind_hp_cutoff_hz)
+        # Selection is driven by the *previous frame's* noise_class, which
+        # the pipeline writes back to ``self._prev_noise_class`` after each
+        # block.  One-frame lag is acceptable.
+        self._sos_default = butter(1, highpass_hz / (self.sr / 2.0), btype="high", output="sos")
+        self._sos_wind = butter(
+            1, cfg.wind_hp_cutoff_hz / (self.sr / 2.0), btype="high", output="sos"
+        )
+        # Active filter and its persistent state.
+        self._active_mode = "default"
+        self._sos = self._sos_default
         self._zi = np.zeros_like(sosfilt_zi(self._sos)).astype(np.float64)
+        # Previous-frame class hint — updated by the pipeline (see set_prev_noise_class).
+        self._prev_noise_class = "clean"
+        # Hysteresis: count consecutive frames that agree with the *opposite*
+        # of the current mode.  Only switch once the count exceeds threshold.
+        # Prevents periodic state-reset thumps when the classifier flutters
+        # between wind and traffic in mixed scenes.
+        self._switch_streak = 0
+        self._switch_threshold = 3   # frames; ~30 ms at 10 ms hops, ~60 ms at 20 ms blocks
         # Minimum-statistics noise floor (power) + speech-power tracker.
         self._noise_pow = 1e-6
         self._sig_pow = 1e-6
         self._floor_hist: list[float] = []
 
     def reset(self) -> None:
+        self._active_mode = "default"
+        self._sos = self._sos_default
         self._zi = np.zeros_like(sosfilt_zi(self._sos)).astype(np.float64)
+        self._prev_noise_class = "clean"
+        self._switch_streak = 0
         self._noise_pow = 1e-6
         self._sig_pow = 1e-6
         self._floor_hist.clear()
 
+    def set_prev_noise_class(self, noise_class: str) -> None:
+        """Called by the pipeline after each block.  The next call to
+        :meth:`process` uses ``noise_class`` to decide which HP cutoff to apply."""
+        self._prev_noise_class = noise_class
+
+    def _select_filter(self) -> None:
+        """Switch between default and wind filters based on prev_noise_class,
+        with hysteresis to avoid flipping on classifier flutter.
+
+        Requires ``_switch_threshold`` consecutive frames of disagreement
+        with the current mode before actually flipping.  Without this, a
+        learned classifier whose smoothed posteriors hover near a tie
+        between two classes (e.g. wind vs traffic) can ping-pong the HP
+        cutoff, producing an audible thump on every switch from the filter
+        state-reset.
+        """
+        want = "wind" if self._prev_noise_class == "wind" else "default"
+        if want == self._active_mode:
+            # Currently agreeing → reset the streak.
+            self._switch_streak = 0
+            return
+        # Disagreement: count consecutive frames before switching.
+        self._switch_streak += 1
+        if self._switch_streak < self._switch_threshold:
+            return
+        # Committed switch — reset state and counter.
+        self._active_mode = want
+        self._sos = self._sos_wind if want == "wind" else self._sos_default
+        self._zi = np.zeros_like(sosfilt_zi(self._sos)).astype(np.float64)
+        self._switch_streak = 0
+
     def process(self, ctx: FrameContext) -> FrameContext:
+        # Update HP cutoff based on prev-frame class hint.
+        self._select_filter()
         x = ctx.audio.astype(np.float64)
         y, self._zi = sosfilt(self._sos, x, zi=self._zi)
         y = y.astype(np.float32)
+        ctx.meta["hp_mode"] = 1.0 if self._active_mode == "wind" else 0.0
 
         # Frame power → smoothed signal power + running noise floor.
         p = float(np.mean(y * y) + 1e-12)

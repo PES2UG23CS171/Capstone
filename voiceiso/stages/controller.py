@@ -86,15 +86,18 @@ class DynamicController(Stage):
                  clean_hold_ms: float = 400.0) -> None:
         self.cfg = cfg
         self._supp = cfg.supp_max
-        self._a_attack = 1.0 - np.exp(-cfg.hop_ms / max(cfg.supp_attack_ms, 1e-3))
         self._clean_snr = clean_snr_db
-        # Leaky clean counter: increments on clean frames, decays slowly on noisy.
-        self._clean_run = 0.0
-        self._clean_needed = max(1, int(clean_hold_ms / max(cfg.hop_ms, 1.0)))
+        # Smoothing/hold are tracked in MILLISECONDS of audio, derived from the
+        # actual block duration each call — NOT a fixed per-call assumption.
+        # (Previously attack/release/hold used cfg.hop_ms but ran once per block,
+        # so the real time-constants were off by the block/hop ratio — 10x at the
+        # 100 ms live block.)
+        self._clean_hold_ms = clean_hold_ms
+        self._clean_ms = 0.0          # ms of sustained confidently-clean audio
 
     def reset(self) -> None:
         self._supp = self.cfg.supp_max
-        self._clean_run = 0.0
+        self._clean_ms = 0.0
 
     @staticmethod
     def _smooth_snr_base(snr_db: float) -> float:
@@ -111,7 +114,7 @@ class DynamicController(Stage):
 
     def _compute_target(self, ctx: FrameContext) -> float:
         """Return the desired suppression ∈ [supp_min, supp_max]."""
-        if self._clean_run >= self._clean_needed:
+        if self._clean_ms >= self._clean_hold_ms:
             return self.cfg.supp_min          # sustained clean → bypass
 
         base = self._smooth_snr_base(ctx.snr_db)
@@ -129,7 +132,13 @@ class DynamicController(Stage):
         # while we are confident speech is active).
         speech_cap = float(np.interp(ctx.vad_prob, [0.4, 0.9], [1.0, 0.92]))
 
-        return float(np.clip(base * modifier * conf_scale,
+        # Whisper protection: whispered speech is unvoiced, HF-dominant, and
+        # quiet — DFN3's default attenuation will treat it as noise.  Halve
+        # the suppression to keep whispers intelligible.
+        whisper = float(ctx.meta.get("whisper_score", 0.0))
+        whisper_scale = 1.0 - 0.5 * whisper            # 1.0 → 0.5 as whisper → 1.0
+
+        return float(np.clip(base * modifier * conf_scale * whisper_scale,
                              self.cfg.supp_min,
                              min(self.cfg.supp_max, speech_cap)))
 
@@ -151,6 +160,18 @@ class DynamicController(Stage):
             g_md *= float(np.interp(res_md, [0.3, 0.7], [1.0, 0.5]))
             g_hi *= float(np.interp(res_hi, [0.3, 0.7], [1.0, 0.5]))
 
+        # Fused echo-confidence: when AEC + NLES still report that the frame
+        # is echo-contaminated (echo_conf high), pull all three bands toward
+        # 0.7 of their current value — a uniform extra ~3 dB suppression
+        # on top of any per-band response above.  This catches the case
+        # where echo is spectrally diffuse and no single band's RES coherence
+        # exceeds 0.3.
+        if ctx.echo_conf > self.cfg.echo_conf_threshold:
+            ec_scale = float(np.interp(ctx.echo_conf, [0.5, 1.0], [1.0, 0.7]))
+            g_lo *= ec_scale
+            g_md *= ec_scale
+            g_hi *= ec_scale
+
         # Speech protection in LF / HF.  Voice fundamentals live at 80–250 Hz;
         # fricatives at >4 kHz.  Never cut these >6 dB (g >= 0.5) during speech.
         if ctx.vad_prob >= 0.6:
@@ -166,24 +187,30 @@ class DynamicController(Stage):
     def process(self, ctx: FrameContext) -> FrameContext:
         cfg = self.cfg
 
-        # ── Leaky clean-run counter ──────────────────────────────────────
+        # Real block duration (ms) — drives every time constant so behaviour is
+        # identical regardless of the caller's block size.
+        dt_ms = 1000.0 * len(ctx.audio) / max(cfg.sample_rate, 1)
+
+        # ── Leaky clean-hold timer (in ms) ───────────────────────────────
         confidently_clean = (
             (not ctx.is_speech)
             and ctx.snr_db >= self._clean_snr
             and ctx.noise_class == "clean"
         )
         if confidently_clean:
-            self._clean_run += 1.0
+            self._clean_ms += dt_ms
         else:
-            # Decay (not reset): a single flicker doesn't kill the hold.
-            self._clean_run = max(0.0, self._clean_run - 2.0)
+            # Decay 2× faster than it builds — a single flicker doesn't kill the
+            # hold, but a real onset clears it quickly.
+            self._clean_ms = max(0.0, self._clean_ms - 2.0 * dt_ms)
 
         target = self._compute_target(ctx)
 
-        # ── Attack / per-class release smoothing ─────────────────────────
+        # ── Attack / per-class release smoothing (time-constant in ms) ───
         release_ms = _CLASS_RELEASE_MS.get(ctx.noise_class, cfg.supp_release_ms)
-        a_release = 1.0 - np.exp(-cfg.hop_ms / max(release_ms, 1e-3))
-        a = self._a_attack if target > self._supp else a_release
+        a_attack = 1.0 - np.exp(-dt_ms / max(cfg.supp_attack_ms, 1e-3))
+        a_release = 1.0 - np.exp(-dt_ms / max(release_ms, 1e-3))
+        a = a_attack if target > self._supp else a_release
         self._supp += a * (target - self._supp)
         ctx.suppression = float(np.clip(self._supp, cfg.supp_min, cfg.supp_max))
 
@@ -196,5 +223,5 @@ class DynamicController(Stage):
         ctx.band_gain = self._compute_band_gains(ctx)
 
         ctx.meta["ctrl_target"] = target
-        ctx.meta["clean_run"] = self._clean_run
+        ctx.meta["clean_ms"] = self._clean_ms
         return ctx

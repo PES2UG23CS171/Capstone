@@ -29,8 +29,17 @@ class PipelineConfig:
     # ── VAD (Silero runs at 16 kHz) ──────────────────────────────────────
     vad_sample_rate: int = 16_000
     vad_window: int = 512              # Silero v5/v6 frame size @ 16 kHz (32 ms)
-    vad_speech_threshold: float = 0.5  # P(speech) above → speech
-    vad_hangover_ms: float = 200.0     # keep "speech" state this long after offset
+    vad_speech_threshold: float = 0.5  # base P(speech) threshold (used if adaptation off)
+    vad_hangover_ms: float = 200.0     # default hangover (vowel-ending case)
+    # Adaptive threshold (track running percentiles of vad_prob over ~30 s).
+    vad_adaptive: bool = True
+    vad_adapt_alpha: float = 1.0 / 1500.0  # EWMA α — 30 s @ 20 ms blocks
+    vad_threshold_min: float = 0.35
+    vad_threshold_max: float = 0.65
+    # Adaptive hangover: short when speech ended on a fricative (HF-dominant
+    # spectrum at offset → voice tail is brief).  Long for vowel endings.
+    vad_hangover_fricative_ms: float = 80.0
+    vad_fricative_hf_ratio: float = 0.45     # HF-energy fraction threshold
 
     # ── Noise classification ─────────────────────────────────────────────
     noise_classes: Tuple[str, ...] = (
@@ -57,6 +66,16 @@ class PipelineConfig:
     aec_dtd_threshold: float = 0.5     # Geigel double-talk detector threshold
     aec_dt_freeze_ms: float = 1000.0   # how long to freeze NLMS after double-talk
     aec_step_size: float = 0.15        # NLMS µ; halved from V1 (was 0.3) for stability
+    # ── GCC-PHAT one-shot delay calibration ──────────────────────────────
+    aec_gcc_phat: bool = True          # estimate loopback delay once at session start
+    aec_gcc_max_delay_ms: float = 100.0  # plausible-range clamp for the delay estimate
+    aec_gcc_peak_threshold: float = 0.2  # min normalised peak to accept; else fall back to 0
+    # ── Nonlinear echo suppression (NLES, per-bin Wiener) ────────────────
+    nles_enabled: bool = True
+    nles_beta: float = 1.5             # over-estimation factor in Wiener formula
+    nles_min_gain_db: float = -20.0    # floor — never attenuate a bin by more than this
+    # ── Fused echo-confidence ────────────────────────────────────────────
+    echo_conf_threshold: float = 0.5   # consumers fire when echo_conf > this
 
     # ── Multi-band controller (V2) ───────────────────────────────────────
     # Band split frequencies for post-DFN per-band gain modulation.
@@ -79,10 +98,70 @@ class PipelineConfig:
     # ── Post-filter (learned tiny GRU) ───────────────────────────────────
     postfilter_model_path: Optional[str] = None  # tiny GRU ONNX (None = bypass)
 
+    # ── Target-speaker extraction (VoiceFilter-Lite-style) ───────────────
+    target_speaker_mask_path: Optional[str] = None  # mask network ONNX (None = bypass)
+
+    # ── Benchmarking ─────────────────────────────────────────────────────
+    # Microsoft DNSMOS P.835 primary model (sig_bak_ovr.onnx).  Non-intrusive
+    # SIG/BAK/OVRL prediction.  None → DNSMOS metrics are skipped.
+    dnsmos_model_path: Optional[str] = None
+
     # ── Speech-quality protection (over-suppression rollback) ────────────
     artifact_band_drop_db: float = 25.0  # sub-band drop that flags over-suppression
     artifact_rollback_mix: float = 0.30  # dry-blend fraction during rollback
     artifact_cap_relief_db: float = 12.0 # how much to relax next-frame atten cap
+    # Multi-cue artifact-confidence fusion weights (sum ~ 1.0).
+    artifact_w_drop: float = 0.40        # ERB sub-band drop
+    artifact_w_kurtosis: float = 0.30    # spectral-kurtosis change (musical noise)
+    artifact_w_formant: float = 0.20     # LPC formant preservation
+    artifact_w_energy: float = 0.10      # total-energy ratio
+    artifact_conf_threshold: float = 0.5  # fused artifact conf above this fires rollback
+    # Per-band rollback: blend dry only in the offending ERB band(s) — narrower
+    # noise re-injection than V1's whole-spectrum dry-blend.
+    artifact_per_band_rollback: bool = True
+
+    # ── Speech preservation ──────────────────────────────────────────────
+    # Sticky speech_conf — current frame can't drop below ``stickiness`` × prior.
+    speech_conf_stickiness: float = 0.7
+    # Pitch detector range (Hz) — covers adult speakers male & female.
+    pitch_lo_hz: float = 70.0
+    pitch_hi_hz: float = 400.0
+
+    # ── Noise classification (learned) ───────────────────────────────────
+    # When set + onnxruntime available, EfficientAT-S replaces the heuristic
+    # noise classifier as the primary path.  Heuristic remains the fallback.
+    # Default None → ``__post_init__`` auto-resolves the shipped native-12 head
+    # (checkpoints/efficientat_head12.onnx) relative to the repo root, so the
+    # learned classifier is the PRIMARY path out of the box (CWD-independent).
+    noise_classifier_model_path: Optional[str] = None
+    # The shipped head ONNX (efficientat_head12.onnx) was trained AND exported
+    # with a STATIC 4.0 s / 400-frame mel input (head_12.pt window_s = 4.0).
+    # The runtime window MUST match the model's frame count or every inference
+    # raises InvalidArgument.  EfficientATNoiseClassifier additionally reads the
+    # model's required frame count from the ONNX input shape and pads/crops to
+    # it, so this value is the buffering target, not a silent failure point.
+    noise_classifier_window_s: float = 4.0     # mn10_as needs ~4 s context
+    # Rerun cadence (ms of input audio between inferences).  The 4 s-window
+    # backbone costs ~11 ms/run on CPU; 500 ms cadence amortises that to ~2 %
+    # of one core while the noise class changes far slower than that anyway.
+    noise_classifier_hop_ms: float = 500.0     # rerun cadence
+    noise_classifier_smooth_alpha: float = 0.5  # EWMA over per-class posteriors
+    # A noise/speech target must exceed this smoothed posterior to win over
+    # "clean".  AudioSet posteriors for a correct coarse class on a short clip
+    # are modest (~0.2–0.4), so a low threshold is right; below it → clean.
+    noise_classifier_clean_threshold: float = 0.15
+
+    # ── Adaptive HP cutoff under wind ────────────────────────────────────
+    # When previous-frame noise_class == 'wind', Preprocessing switches to this
+    # higher cutoff to attenuate the broadband LF rumble that defeats the
+    # default 25 Hz cutoff.  1st-order filter — only ~6 dB at 80 Hz fundamental.
+    wind_hp_cutoff_hz: float = 80.0
+
+    # ── Comfort-noise boost during echo-only suppression ────────────────
+    # When echo_conf > echo_conf_threshold AND vad_prob is low, raise the
+    # comfort-noise level by this many dB so the DT-suppressed gap doesn't
+    # sound like a dropped call.  Capped above comfort_noise_db.
+    cn_echo_boost_db: float = 6.0
 
     # ── Live-stream queue / latency mode ─────────────────────────────────
     # Trade-off:  small queue + latency='low' → minimum end-to-end delay but
@@ -99,6 +178,38 @@ class PipelineConfig:
     dfn_model_dir: Optional[str] = None  # None → DFN3 default bundled model
     data_root: str = "data"
     checkpoint_dir: str = "checkpoints"
+
+    def __post_init__(self) -> None:
+        # Auto-wire the shipped native-12 EfficientAT head when the caller did
+        # not pin a path, resolving it relative to the repo root so it works no
+        # matter what the current working directory is.  If the checkpoint is
+        # absent the path stays None and the pipeline falls back (loudly) to the
+        # heuristic classifier — see StreamingPipeline.
+        if self.noise_classifier_model_path is None:
+            from pathlib import Path
+            repo_root = Path(__file__).resolve().parent.parent
+            ck = Path(self.checkpoint_dir)
+            if not ck.is_absolute():
+                ck = repo_root / ck
+            # Prefer the dev-trained, uploader-grouped head (v2 — correct
+            # protocol) over the legacy eval-pool head (v1) when present.
+            for fname in ("efficientat_head12_v2.onnx", "efficientat_head12.onnx"):
+                candidate = ck / fname
+                if candidate.exists():
+                    self.noise_classifier_model_path = str(candidate)
+                    break
+
+        # Same auto-wiring for the DNSMOS P.835 model so a dropped-in
+        # checkpoints/sig_bak_ovr.onnx is used (and reproducible) without flags.
+        if self.dnsmos_model_path is None:
+            from pathlib import Path
+            repo_root = Path(__file__).resolve().parent.parent
+            ck = Path(self.checkpoint_dir)
+            if not ck.is_absolute():
+                ck = repo_root / ck
+            dns = ck / "sig_bak_ovr.onnx"
+            if dns.exists():
+                self.dnsmos_model_path = str(dns)
 
     # ── Derived (samples) ─────────────────────────────────────────────────
     @property

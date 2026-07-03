@@ -26,6 +26,7 @@ import logging
 import math
 import queue
 import sys
+import threading
 import time
 import traceback
 from multiprocessing import Process, Queue
@@ -124,6 +125,18 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             pipeline = None
     if pipeline is None:
         log.warning("voiceiso pipeline unavailable — falling back to StubDenoiser passthrough.")
+        # Make the degraded (no-denoising) state VISIBLE to the GUI, not silent.
+        evt_q.put(Event(
+            EvtType.ERROR,
+            "voiceiso pipeline failed to load — running in PASSTHROUGH (no "
+            "denoising). Check DeepFilterNet / onnxruntime install.",
+        ))
+    elif pipeline.backend_summary.get("enhancement") != "deepfilternet3":
+        evt_q.put(Event(
+            EvtType.ERROR,
+            "DeepFilterNet3 not loaded — enhancement is PASSTHROUGH. "
+            "Install deepfilternet (+ Rust toolchain).",
+        ))
 
     denoiser = StubDenoiser(
         model_path=cfg.model_path,
@@ -131,6 +144,51 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         block_size=cfg.block_size,
     )
     denoiser.strength = strength
+
+    # ── DSP worker thread (H2) ───────────────────────────────────────────
+    # DeepFilterNet3 + the full chain must NOT run on the real-time audio
+    # callback: at 20 ms blocks a single over-budget block causes an xrun.
+    # The callback only enqueues input and dequeues the most-recent output
+    # (drop-oldest, bounded latency); this thread does the heavy work.
+    _proc_in: queue.Queue = queue.Queue(maxsize=4)
+    _proc_out: queue.Queue = queue.Queue(maxsize=4)
+    _worker_alive = threading.Event()
+    _worker_alive.set()
+
+    def _drop_oldest_put(q: queue.Queue, item) -> None:
+        if q.full():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            q.put_nowait(item)
+        except queue.Full:
+            pass
+
+    def _worker_loop() -> None:
+        while _worker_alive.is_set():
+            try:
+                block = _proc_in.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                t0 = time.perf_counter()
+                ctx = pipeline.process_block(block)
+                wet = ctx.audio[: len(block)]
+                s = strength            # current value (benign read race)
+                if s < 1.0:
+                    wet = (s * wet + (1.0 - s) * block[: len(wet)]).astype(np.float32)
+                budget = len(block) / cfg.sample_rate
+                rtf = (time.perf_counter() - t0) / budget if budget > 0 else 0.0
+                _drop_oldest_put(_proc_out, (wet, rtf))
+            except Exception:
+                log.error("DSP worker process_block failed:\n%s", traceback.format_exc())
+
+    _worker: Optional[threading.Thread] = None
+    if pipeline is not None:
+        _worker = threading.Thread(target=_worker_loop, daemon=True, name="voiceiso-dsp")
+        _worker.start()
 
     # ── sounddevice callback ─────────────────────────────────────────────
 
@@ -162,20 +220,19 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             return
 
         if enabled and pipeline is not None:
-            # Run the whole block through the voiceiso pipeline (DFN3 + chain).
+            # Hand the block to the DSP worker thread; emit the most-recent
+            # finished block.  The callback never runs DFN3 itself, so a slow
+            # block can't xrun the audio device — it only adds bounded latency.
             mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
-            dry = mono.copy()
-
-            t0 = time.perf_counter()
-            ctx = pipeline.process_block(mono)
-            wet = ctx.audio[: len(mono)]
-            budget = len(mono) / cfg.sample_rate
-            current_rtf = (time.perf_counter() - t0) / budget if budget > 0 else 0.0
-
-            # GUI "strength" slider = global wet/dry trim on top of the pipeline.
-            if strength < 1.0:
-                wet = strength * wet + (1.0 - strength) * dry[: len(wet)]
-            processed = wet
+            _drop_oldest_put(_proc_in, mono)
+            try:
+                y, rtf = _proc_out.get_nowait()
+                current_rtf = rtf
+            except queue.Empty:
+                y = np.zeros(frames, dtype=np.float32)   # warmup / brief underrun
+            if len(y) < frames:
+                y = np.concatenate([y, np.zeros(frames - len(y), dtype=np.float32)])
+            processed = y[:frames]
         elif enabled:
             processed = denoiser.process(indata[:, :cfg.channels].copy())
         else:
@@ -310,6 +367,11 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         stream.stop()
         stream.close()
         log.info("Stream closed.")
+
+    # Stop the DSP worker thread.
+    _worker_alive.clear()
+    if _worker is not None:
+        _worker.join(timeout=1.0)
 
     evt_q.put(Event(EvtType.ENGINE_STOPPED))
     log.info("Engine process exiting.")

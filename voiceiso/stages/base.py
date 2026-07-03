@@ -29,7 +29,8 @@ class FrameContext:
     # ── Analysis signals filled in by stages ─────────────────────────────
     vad_prob: float = 0.0              # P(speech) ∈ [0, 1]
     is_speech: bool = False            # thresholded + hangover-smoothed
-    speech_conf: float = 0.0           # fused speech confidence (VAD + consonants + voiced)
+    voiced_score: float = 0.0          # pitch-based voicing strength ∈ [0, 1]
+    speech_conf: float = 0.0           # fused speech confidence (VAD + voiced + consonants)
     noise_class: str = "clean"         # top noise label this frame
     noise_probs: Dict[str, float] = field(default_factory=dict)
     noise_conf: float = 0.0            # top-class probability (classifier confidence)
@@ -44,6 +45,11 @@ class FrameContext:
     dt_active: bool = False            # double-talk currently detected
     res_band: Tuple[float, float, float] = (0.0, 0.0, 0.0)
                                        # per-band residual-echo coherence ∈ [0, 1]
+    # Fused echo-confidence ∈ [0, 1].  0 = no echo evidence (or AEC disabled),
+    # 1 = strong evidence echo is present.  Consumed by VAD (downweight),
+    # SpeakerEmbedder (skip x-vector update), Controller (raise per-band
+    # attenuation), PostFilter (boost comfort noise).
+    echo_conf: float = 0.0
 
     # ── Control signals (set by the dynamic controller) ──────────────────
     suppression: float = 1.0           # 0 = dry, 1 = full wet

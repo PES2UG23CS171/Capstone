@@ -30,11 +30,14 @@ Four principles, each forced on us by measurement or architectural critique:
 3. **Only get clever when confident.** The controller bypasses DFN (saving CPU)
    *only* after a sustained run of confidently-clean frames, never on a single
    frame's guess.
-4. **Use the model's own state — don't fight it.** DFN3's GRU hidden states
-   persist across `enhance()` calls via `_state`. Prepending a look-back history
-   buffer on every call (old V1 design) reprocessed audio through the recurrent
-   layers twice, wasting compute and doubling latency. V2 passes only the new
-   block each call; the model already holds the temporal context it needs.
+4. **Process per block; don't re-run history.** Each `enhance()` call gets only
+   the new block. DFN3's `_state` carries the STFT/ISTFT + ERB-normalisation
+   state across calls — **not** the GRU hidden states (the GRUs run stateless,
+   `h0`=0 each call), so temporal context spans only the STFT frames *within*
+   the block. We still avoid the old V1 look-back buffer (which re-ran 200 ms of
+   history through the network), but we do **not** claim cross-call recurrence we
+   don't have. Practical consequence: larger blocks give DFN3 more context — the
+   benchmark uses 100 ms blocks, the live paths 20 ms.
 
 ---
 
@@ -302,10 +305,12 @@ post-filter (DFN already preserves them, so it does **not** throttle the enhance
     Output is **fully wet**. Writes `enh_wet` / `enh_atten_db` meta.
 - **`reset()`** — calls `_state.reset()` to clear DFN's recurrent state.
 
-> V2 streaming: DFN3's `_state` object is the context. Passing only the new 20 ms
-> block per call eliminates the V1 overlap-save overhead (which reprocessed 200 ms
-> of history through the recurrent layers on every block) and reduces end-to-end
-> latency from ~100 ms to ~20–25 ms.
+> Streaming: passing only the new block per call eliminates the V1 overlap-save
+> overhead (which reprocessed 200 ms of history every block). Note DFN3's `_state`
+> holds STFT/ERB analysis state, **not** GRU recurrence — there is no cross-call
+> hidden-state memory — so per-block context is limited to the block's STFT
+> frames. End-to-end latency ≈ block size + one queue hop + DFN3's internal
+> look-ahead, not the bare STFT-framing figure.
 
 ### 5.9 `PostFilter` (`stages/postfilter.py`)
 
@@ -407,9 +412,48 @@ Real LibriSpeech speech + noise @ 5 dB input SNR, via `python -m voiceiso bench`
 speech-preservation, post-filter, AEC (off by default), benchmark, dynamic mixer, CLI,
 offline file enhancement.
 
-**Scaffolded (interfaces + upgrade paths):** noise classifier is a coarse heuristic
-(learned YAMNet/PANNs path documented); competing-speech only *flags* (VoiceFilter-Lite
-extraction is the next step).
+**Noise classifier (learned EfficientAT, primary path):** a frozen EfficientAT
+`mn10_as` backbone + a trained native 12-class head, exported to
+`checkpoints/efficientat_head12.onnx` (static 4 s / 400-frame mel input). It is
+auto-wired by `PipelineConfig` and runs at a 4 s window / 500 ms cadence; the
+zero-dependency heuristic remains the transparent fallback when the checkpoint or
+onnxruntime is absent (the fallback is logged and surfaced in `backend_summary`).
+
+**Classifier accuracy — corrected protocol (`efficientat_head12_v2.onnx`).**
+Trained on **FSD50K.dev_audio** with an **uploader-grouped** train/val split
+(train∩val uploader overlap = 0); the frozen backbone embedding is read straight
+out of the exported ONNX and only the Linear head is trained
+(`scripts/retrain_head_dev.py`). Tested on the official held-out **FSD50K.eval**
+set (uploader-disjoint from dev by construction).
+
+| Backend | macro-F1 | top-1 |
+|---|---|---|
+| heuristic | 0.089 | 0.128 |
+| pretrained-direct (527 AudioSet → 12 map) | 0.211 | 0.258 |
+| deployed head v1 (eval-pool, **train-on-test ⇒ inflated**) | *0.636* | *0.658* |
+| **NEW head v2 (dev-trained, honest)** | **0.564** | **0.621** |
+
+> v1's 0.636 is **not valid** — it was trained on FSD50K eval-pool clips, so testing
+> it on eval is train-on-test. On a leakage-free set held out from *both* (n=282),
+> v1 and v2 are on par: v1 0.528 / v2 0.503 macro-F1, with v2 ahead on top-1
+> (0.589 vs 0.550). v2 is the methodologically correct, reproducible model and is
+> the deployed default. Reproduce: `python -m scripts.retrain_head_dev --eval-only`.
+> Best uploader-disjoint val macro-F1 = 0.680.
+
+> **Below the 0.70 target — bottleneck (evidenced):** it is the *frozen
+> representation*, not the head or threshold. A clean-threshold sweep is flat
+> (0.570 across 0.15→0.04); head capacity barely moves it (linear 0.676 → MLP-512
+> 0.695 val); and the worst classes are data-starved (`fan`: 64 dev clips, F1 0.34;
+> `speech` F1 0.38). Minimum-change path toward 0.70 *without* unfreezing the
+> backbone: (1) source `fan`/`hvac` from DEMAND/MUSAN and add clean speech to lift
+> the starved classes (macro-F1 is dragged by them); (2) average the backbone
+> embedding over multiple windows per clip at inference; (3) an MLP-512 head (+~0.02).
+> These stack but are unlikely to fully close the gap — ~0.70 on held-out FSD50K
+> eval needs backbone fine-tuning, which is out of scope (frozen by design).
+
+**Scaffolded (interfaces + upgrade paths):** competing-speech only *flags*
+(VoiceFilter-Lite extraction is the next step); ECAPA speaker embedder is
+passthrough until a model is provided.
 
 **Known caveats:**
 - Live mic path is wired but **unverified** here (no audio device) — validate on a real
