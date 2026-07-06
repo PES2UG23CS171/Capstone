@@ -65,8 +65,12 @@ class _PocWorker(QThread):
 
     def run(self):
         try:
-            # Import the PoC module (lives at project root)
+            # Import the PoC module — it lives in legacy/ (moved from the
+            # project root); out_dir stays on the path for WAV outputs.
             sys.path.insert(0, str(self._out_dir))
+            legacy_dir = self._out_dir / "legacy"
+            if legacy_dir.is_dir() and str(legacy_dir) not in sys.path:
+                sys.path.insert(0, str(legacy_dir))
 
             # Force-reload to pick up any parameter changes — Python's
             # import cache (sys.modules) may hold a stale version from an
