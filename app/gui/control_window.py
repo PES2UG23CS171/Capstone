@@ -4,7 +4,8 @@ PyQt6 control window — the settings panel for the audio filter.
 Provides:
     • On / Off toggle for noise suppression
     • Strength slider (0 – 100 %)
-    • Output gain slider (-12 … +12 dB)
+    • Output gain slider (-12 … +6 dB — positive gain capped: above +6 dB an
+      open-speaker demo howls, since DFN3 preserves the returning speech)
     • Input / output device combo-boxes
     • Real-time input & output level meters
     • Status bar with x-run counter
@@ -175,7 +176,7 @@ class ControlWindow(QMainWindow):
         grp_gain = QGroupBox("Output Gain")
         lay_gain = QHBoxLayout(grp_gain)
         self.slider_gain = QSlider(Qt.Orientation.Horizontal)
-        self.slider_gain.setRange(-120, 120)   # tenths of dB
+        self.slider_gain.setRange(-120, 60)    # tenths of dB; +6 dB cap (feedback margin)
         self.slider_gain.setValue(0)
         self.slider_gain.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_gain.setTickInterval(30)

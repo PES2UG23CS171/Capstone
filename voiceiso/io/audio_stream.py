@@ -79,10 +79,18 @@ class LiveStream:
         # Drop-OLDEST policy: if the worker is behind, discard the *stale* input
         # rather than the *fresh* one, so latency stays bounded.
         self.drops_in += self._put_drop_oldest(self._in_q, mono)
-        # Emit previously-enhanced audio; underflow → silence (warmup/overload).
+        # Emit the FRESHEST enhanced block; underflow → silence (overload).
+        # Draining to the newest item means an output backlog left by any
+        # worker stall (which would otherwise persist forever — both queue
+        # ends run at the callback cadence) costs one skip instead of a
+        # permanent +queue-depth of latency.
+        y = None
         try:
-            y = self._out_q.get_nowait()
+            while True:
+                y = self._out_q.get_nowait()
         except queue.Empty:
+            pass
+        if y is None:
             y = np.zeros(frames, dtype=np.float32)
         if len(y) < frames:
             y = np.concatenate([y, np.zeros(frames - len(y), dtype=np.float32)])
@@ -92,6 +100,8 @@ class LiveStream:
 
     def run(self, duration_s: float = 0.0) -> None:  # pragma: no cover
         self.pipe.reset()
+        print("voiceiso live: warming up models (~2 s)…", flush=True)
+        self.pipe.warmup()
         self._run = True
         self.drops_in = 0
         self.drops_out = 0
