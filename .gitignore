@@ -8,6 +8,11 @@ __pycache__/
 # FSD50K dataset (49 GB — download from https://zenodo.org/records/4060432)
 dataset/FSD50K/
 
+# Generated audio splits — large binary data, not for version control
+dataset/train/
+dataset/val/
+dataset/test/
+
 # third_party contains nested git repos — key code is vendored in voiceiso/stages/
 third_party/
 
