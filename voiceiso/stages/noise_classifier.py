@@ -9,10 +9,10 @@ Two implementations behind one ``ctx.noise_class`` / ``ctx.noise_probs`` /
 ``ctx.noise_conf`` contract:
 
 * :class:`EfficientATNoiseClassifier` — **primary path**, learned AudioSet
-  tagger (EfficientAT-S) exported to ONNX, ~2 ms inference / 200 ms window.
-  Maps 527 AudioSet posteriors onto our 12-class label set via a hand-coded
-  map.  Faster class response than YAMNet (which needs 960 ms windows) and
-  meaningfully more discriminative than the heuristic.
+  tagger (EfficientAT mn10) exported to ONNX, ~11 ms inference / 4 s window
+  re-run every 500 ms.  With a native 12-label head the AudioSet map is
+  skipped; otherwise 527 AudioSet posteriors map onto the 12-class label set
+  via a hand-coded map.  Meaningfully more discriminative than the heuristic.
 
 * :class:`HeuristicNoiseClassifier` — **fallback**, zero-dependency, ~CPU-free.
   Used when no ONNX runtime / no checkpoint.  Coarse 5-cluster discrimination
@@ -224,9 +224,17 @@ _TARGET_TO_INTERNAL: dict[str, str] = {
     "wind":             "wind",
     "music":            "music",
     "tv":               "television",    # display: TV; controller keys on television
-    # Generic speech present → treat as clean for suppression; VAD + SpeakerEmbedder
-    # decide target-vs-competing.  is_speech keeps the clean-run bypass from firing.
-    "speech":           "clean",
+    # Generic speech present → map to "other", NOT "clean".  "speech" says the
+    # window's FOREGROUND is the user talking — it says nothing about the
+    # background noise they are talking over.  Mapping it to clean set the
+    # suppression modifier to 0.0, which disabled DFN3 for the entire time the
+    # user was speaking in noise — the exact scenario a voice isolator exists
+    # for (measured: SI-SDRi ≈ 0 on speech+noise mixes because enhancement
+    # never engaged).  Via "other" the controller applies its SNR-driven
+    # default: strong suppression in bad SNR, ~none in a genuinely quiet room.
+    # The clean-hold bypass still fires in confirmed-quiet silence (it
+    # requires noise_class=="clean" AND no speech AND SNR ≥ 22 dB).
+    "speech":           "other",
     "competing_speech": "competing_speech",
     # Unknown noise → pass through; controller .get(..., default) applies a
     # moderate full-band suppression and PostFilter uses the clean CN colour.
@@ -322,9 +330,12 @@ class EfficientATNoiseClassifier(_BaseClassifier):
       * **Native 12-label head** — a fine-tuned head whose ``labels`` metadata
         is exactly the 12 target labels; the AudioSet map is skipped (identity).
 
-    Window cadence: a 200 ms sliding window updated every ``hop_ms``
-    pipeline blocks; between updates the previously-computed posteriors are
-    reused (so per-block cost amortises to ~0.4 ms).
+    Window cadence: a 4 s sliding window (the head's static mel input) re-run
+    every ``noise_classifier_hop_ms`` of audio; between updates the
+    previously-computed posteriors are reused (~11 ms inference amortised over
+    500 ms ≈ 2 % of one core).  Until the window first fills, a partial buffer
+    of ≥ ``noise_classifier_min_infer_s`` is tile-repeated to the window
+    length (mirrors the training pad policy for short clips).
 
     Output contract (controller-compatible):
       * ``ctx.noise_class``  — INTERNAL class (clean/fan/hvac/traffic/keyboard/
@@ -411,6 +422,10 @@ class EfficientATNoiseClassifier(_BaseClassifier):
         # of input audio (not process() calls — caller block size varies).
         self._buf_model = np.zeros(0, dtype=np.float32)
         self._window_samples = int(self._MODEL_SR * cfg.noise_classifier_window_s)
+        # Minimum buffered audio before the first inference: a partial buffer
+        # (≥ this, < window) is tile-repeated to the window length (H2).
+        self._min_infer_samples = int(self._MODEL_SR * float(
+            getattr(cfg, "noise_classifier_min_infer_s", 1.0)))
         # One-shot guard so a recurring inference error logs once, not per block.
         self._warned_infer = False
         if self._req_frames is not None:
@@ -527,12 +542,24 @@ class EfficientATNoiseClassifier(_BaseClassifier):
             self._buf_model = self._buf_model[-self._window_samples:]
         self._ms_since_update += block_ms
 
-        # Rerun inference at the configured cadence and once we have enough audio.
-        if (self._ms_since_update >= self._hop_ms and
-                len(self._buf_model) >= self._window_samples):
+        # Rerun inference at the configured cadence.  A FULL window is not
+        # required: with ≥ noise_classifier_min_infer_s buffered, a partial
+        # buffer is tile-repeated to the model's window — mirroring the
+        # training pad policy for short clips.  Without this the classifier
+        # physically could not label the first 4 s of every session or any
+        # clip shorter than 4 s (18.4 % of the FSD50K eval set was forced to
+        # "clean" in the reported numbers).
+        min_samples = self._min_infer_samples
+        have = len(self._buf_model)
+        if self._ms_since_update >= self._hop_ms and have >= min_samples:
             self._ms_since_update = 0.0
+            if have >= self._window_samples:
+                win = self._buf_model[-self._window_samples:]
+            else:
+                reps = int(np.ceil(self._window_samples / have))
+                win = np.tile(self._buf_model, reps)[-self._window_samples:]
             try:
-                post = self._posteriors(self._buf_model[-self._window_samples:])
+                post = self._posteriors(win)
                 fresh = self._map_to_target_labels(post)
                 for t in _TARGET_LABELS:
                     self._smoothed[t] = (1.0 - self._alpha) * self._smoothed[t] + self._alpha * fresh.get(t, 0.0)
