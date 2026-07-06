@@ -94,10 +94,18 @@ class DynamicController(Stage):
         # 100 ms live block.)
         self._clean_hold_ms = clean_hold_ms
         self._clean_ms = 0.0          # ms of sustained confidently-clean audio
+        # Smoothed outputs (H3): band gains and post-filter strength get the
+        # same attack/release treatment as _supp — previously they stepped
+        # straight to the class table's values on a classifier flip (e.g.
+        # clean→keyboard = −8 dB on g_hi in one block edge).
+        self._band = np.ones(3, dtype=np.float64)
+        self._pf = 0.0
 
     def reset(self) -> None:
         self._supp = self.cfg.supp_max
         self._clean_ms = 0.0
+        self._band = np.ones(3, dtype=np.float64)
+        self._pf = 0.0
 
     @staticmethod
     def _smooth_snr_base(snr_db: float) -> float:
@@ -214,14 +222,25 @@ class DynamicController(Stage):
         self._supp += a * (target - self._supp)
         ctx.suppression = float(np.clip(self._supp, cfg.supp_min, cfg.supp_max))
 
-        # ── Post-filter aggressiveness ───────────────────────────────────
+        # ── Post-filter aggressiveness (attack/release smoothed) ─────────
         pf = _CLASS_POSTFILTER.get(ctx.noise_class, 0.5)
         snr_scale = float(np.interp(ctx.snr_db, [0.0, 25.0], [1.0, 0.3]))
-        ctx.postfilter_strength = float(np.clip(pf * snr_scale, 0.0, 1.0))
+        pf_target = float(np.clip(pf * snr_scale, 0.0, 1.0))
+        a_pf = a_attack if pf_target > self._pf else a_release
+        self._pf += a_pf * (pf_target - self._pf)
+        ctx.postfilter_strength = float(np.clip(self._pf, 0.0, 1.0))
 
-        # ── Per-band gains ───────────────────────────────────────────────
-        ctx.band_gain = self._compute_band_gains(ctx)
+        # ── Per-band gains (attack/release smoothed) ─────────────────────
+        # Gain DOWN (more cut) follows the attack constant; gain UP (recover
+        # toward unity) follows the release constant, so a classifier flip
+        # glides instead of stepping.  The MultiBandGainModulator additionally
+        # ramps per-sample inside each block.
+        band_target = np.asarray(self._compute_band_gains(ctx), dtype=np.float64)
+        a_band = np.where(band_target < self._band, a_attack, a_release)
+        self._band += a_band * (band_target - self._band)
+        ctx.band_gain = (float(self._band[0]), float(self._band[1]), float(self._band[2]))
 
         ctx.meta["ctrl_target"] = target
+        ctx.meta["band_gain_target"] = tuple(float(g) for g in band_target)
         ctx.meta["clean_ms"] = self._clean_ms
         return ctx

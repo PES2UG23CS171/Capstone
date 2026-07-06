@@ -21,31 +21,27 @@ At unity gain ``g_lo·y_lo + g_md·y_md + g_hi·y_hi == x_dly`` exactly — no
 destructive interference at band edges, no coloration.  This is the classic
 complementary-filter trick used in audio crossovers.
 
-Bypass behaviour at unity gain
-------------------------------
-**Important:** when all gains are unity (≈ 99 % of the time in normal speech),
-this stage is a **true passthrough** — no delay, no FIR compute.  The FIR
-filter states are reset to zero on bypass.  When the controller later flips
-to non-unity gain, the FIR ramps up over its impulse-response length
-(~64 samples ≈ 1.3 ms) — short enough to be inaudible — and the output gains
-a 32-sample (≈ 0.67 ms) group delay for as long as the gains stay non-unity.
+Always-on, constant delay, per-sample gain ramps
+------------------------------------------------
+The stage runs its filterbank on EVERY block and emits a constant
+``(n_taps−1)/2`` = 15-sample (0.31 ms @ 48 kHz) group delay.  An earlier
+design bypassed (zero-delay) at unity gain and spliced into the delayed path
+when gains went active — each toggle inserted/removed 15 samples of timeline
+and re-primed the FIR state with zeros (an audible click), and the resulting
+variable delay corrupted SI-SDR whenever the classifier fired.  The benchmark
+now time-aligns output to reference before scoring (bench C4 fix), so the
+honest constant delay costs nothing, and the always-on filterbank keeps FIR
+state warm so there are no mode transitions at all.
 
-Why not "always delay"?
-~~~~~~~~~~~~~~~~~~~~~~~
-An earlier design always emitted the delayed signal so the group delay was
-constant across blocks.  This produced a *catastrophic* benchmark regression:
-because the SI-SDR / correlation metrics compare sample-aligned signals, a
-constant 32-sample shift drops correlation to ~0.0 on speech.  Real-world
-listeners can't hear 0.67 ms of delay, but the metric does.
-
-The chosen alternative — zero-delay bypass at unity, small transient on
-transition — keeps the bench honest and is what commercial systems do.
+Gains are additionally interpolated PER SAMPLE from the previous block's
+values to the current ones, so even a large controller step (already
+attack/release-smoothed upstream) glides over 100 ms instead of stepping at a
+block edge (zipper noise).
 
 CPU
 ---
-* Bypass:  ~0.001 ms / block (just the threshold check)
-* Active:  ~0.3 ms / block (2 × 65-tap FIR @ 960 samples)
-* Latency added (active only): 32 samples ≈ 0.67 ms
+* ~0.1 ms / block (2 × 31-tap FIR @ 4800 samples + mixing)
+* Latency added: constant 15 samples ≈ 0.31 ms
 """
 
 from __future__ import annotations
@@ -59,10 +55,6 @@ from voiceiso.stages.base import FrameContext, Stage
 
 class MultiBandGainModulator(Stage):
     name = "multiband"
-
-    # Loose threshold for "at unity" — small float jitter from the controller
-    # (e.g. 0.9999) shouldn't force unnecessary FIR compute / delay.
-    _UNITY_EPS = 1e-3
 
     def __init__(self, cfg: PipelineConfig) -> None:
         self.cfg = cfg
@@ -82,19 +74,14 @@ class MultiBandGainModulator(Stage):
         self._zi_lo = np.zeros(n_taps - 1, dtype=np.float64)
         self._zi_hi = np.zeros(n_taps - 1, dtype=np.float64)
         self._delay_buf = np.zeros(self._group_delay, dtype=np.float64)
-        # Tracks whether we are currently in active (delayed) mode so we can
-        # cleanly reset state when bypassing.
-        self._was_active = False
+        # Previous block's applied gains — start point of this block's ramp.
+        self._g_prev = np.ones(3, dtype=np.float64)
 
     def reset(self) -> None:
         self._zi_lo[:] = 0.0
         self._zi_hi[:] = 0.0
         self._delay_buf[:] = 0.0
-        self._was_active = False
-
-    def _is_unity(self, g_lo: float, g_md: float, g_hi: float) -> bool:
-        e = self._UNITY_EPS
-        return (abs(g_lo - 1.0) < e and abs(g_md - 1.0) < e and abs(g_hi - 1.0) < e)
+        self._g_prev[:] = 1.0
 
     def _delay(self, x: np.ndarray) -> np.ndarray:
         """Delay ``x`` by ``self._group_delay`` samples with state across blocks."""
@@ -114,60 +101,39 @@ class MultiBandGainModulator(Stage):
             )
         return out
 
-    def _clear_active_state(self) -> None:
-        """Wipe FIR / delay state and mark the stage inactive.
-
-        Called from any bypass path so that when the stage next goes active
-        the FIR state isn't conditioned on audio from many blocks ago — which
-        would re-emit stale samples as the first n_taps of output (an audible
-        click on resume).
-        """
-        if self._was_active:
-            self._zi_lo[:] = 0.0
-            self._zi_hi[:] = 0.0
-            self._delay_buf[:] = 0.0
-            self._was_active = False
-
     def process(self, ctx: FrameContext) -> FrameContext:
-        g_lo, g_md, g_hi = ctx.band_gain
-
-        # Skip multi-band entirely when DFN3 didn't run on this frame.
-        # The multi-band's job is to clean up *residuals* DFN3 left behind;
-        # applying band attenuation to the raw noisy signal just darkens it
-        # without removing meaningful noise.  ``enh_wet == 0`` is set by the
-        # Enhancement stage on bypass / passthrough.  Reset FIR state on this
-        # path too — otherwise (active → enh-bypass → active) resumes with
-        # stale buffer content.
+        # Gain targets: the controller's (already attack/release-smoothed)
+        # band gains — forced to unity when DFN3 didn't run on this frame
+        # (the multi-band's job is cleaning up *residuals* DFN3 left behind;
+        # attenuating the raw noisy signal just darkens it).
         if float(ctx.meta.get("enh_wet", 1.0)) < 0.5:
-            self._clear_active_state()
-            ctx.meta["mb_gain_lo"] = 1.0
-            ctx.meta["mb_gain_md"] = 1.0
-            ctx.meta["mb_gain_hi"] = 1.0
-            ctx.meta["mb_active"] = 0.0
-            return ctx
+            g_t = np.ones(3, dtype=np.float64)
+        else:
+            g_t = np.asarray(ctx.band_gain, dtype=np.float64)
 
-        if self._is_unity(g_lo, g_md, g_hi):
-            # True passthrough: no delay, no FIR work.  Reset FIR/delay state
-            # so the next non-unity block doesn't re-emit stale buffer content.
-            self._clear_active_state()
-            ctx.meta["mb_gain_lo"] = 1.0
-            ctx.meta["mb_gain_md"] = 1.0
-            ctx.meta["mb_gain_hi"] = 1.0
-            ctx.meta["mb_active"] = 0.0
-            return ctx
-
-        # Active path: split into 3 bands and apply per-band gains.
+        # Filterbank runs unconditionally: constant 15-sample delay, warm FIR
+        # state, no bypass↔active splices (see module docstring).
         x = ctx.audio.astype(np.float64)
+        n = len(x)
         y_lo, self._zi_lo = lfilter(self._fir_lo, [1.0], x, zi=self._zi_lo)
         y_hi, self._zi_hi = lfilter(self._fir_hi, [1.0], x, zi=self._zi_hi)
         x_dly = self._delay(x)
         y_md = x_dly - y_lo - y_hi                       # perfect-reconstruction residual
 
-        y = float(g_lo) * y_lo + float(g_md) * y_md + float(g_hi) * y_hi
+        if np.allclose(g_t, 1.0, atol=1e-6) and np.allclose(self._g_prev, 1.0, atol=1e-6):
+            # Unity throughout the block: PR identity says the mix is exactly
+            # x_dly — skip the ramp math (bit-exact, saves a few multiplies).
+            y = x_dly
+        else:
+            # Per-sample linear ramp from last block's gains to this block's.
+            ramp = np.linspace(0.0, 1.0, n, endpoint=True)[:, None]
+            g = self._g_prev[None, :] * (1.0 - ramp) + g_t[None, :] * ramp
+            y = g[:, 0] * y_lo + g[:, 1] * y_md + g[:, 2] * y_hi
+        self._g_prev = g_t.copy()
+
         ctx.audio = y.astype(np.float32)
-        self._was_active = True
-        ctx.meta["mb_gain_lo"] = float(g_lo)
-        ctx.meta["mb_gain_md"] = float(g_md)
-        ctx.meta["mb_gain_hi"] = float(g_hi)
-        ctx.meta["mb_active"] = 1.0
+        ctx.meta["mb_gain_lo"] = float(g_t[0])
+        ctx.meta["mb_gain_md"] = float(g_t[1])
+        ctx.meta["mb_gain_hi"] = float(g_t[2])
+        ctx.meta["mb_active"] = float(not np.allclose(g_t, 1.0, atol=1e-6))
         return ctx
