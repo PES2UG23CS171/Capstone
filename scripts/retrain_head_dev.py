@@ -15,13 +15,26 @@ Protocol (audit fix — see ARCHITECTURE.md §10 / README):
     weights, so the ONNX structure is byte-for-byte the same shape — we only swap
     hd.weight / hd.bias.  No new nodes, no new models.
 
-Outputs:
-  * checkpoints/efficientat_head12_v2.onnx (+ .data)  — new native-12 head ONNX.
-  * checkpoints/dev_emb_cache.npz                     — cached embeddings.
-  * checkpoints/fsd50k_split_dev.json                 — the grouped split.
+Window policy (v3 — rolling-window-consistent training):
+  The deployed classifier sees a ROLLING 4 s window of a live stream: events
+  usually occupy a fraction of the window at an arbitrary position, embedded
+  in room tone.  v2 trained on tile-first-4s crops and measurably collapsed on
+  such windows (true-class posterior 0.88 → 0.26 for an event at the window
+  edge).  v3 therefore extracts, per clip:
+    * clips ≥ 4 s: TWO random 4 s crops (deterministic per fname), and
+    * clips < 4 s: one cyclic tile from a random phase (matches the runtime
+      partial-buffer tile-pad) PLUS one "sparse" variant — the clip placed at
+      a random offset inside 4 s of low-level noise floor (event-in-context).
+  Same uploader-grouped split as v2 (loaded from fsd50k_split_dev.json), so
+  the window policy is the only variable.
 
-Then evaluates 4 baselines on the eval test set and prints macro-F1 / precision /
-recall / per-class / top-1 / confusion matrix.
+Outputs:
+  * checkpoints/efficientat_head12_v3.onnx (+ .data)  — window-robust head.
+  * checkpoints/dev_emb_cache_v3.npz                  — cached embeddings.
+  * checkpoints/fsd50k_split_dev.json                 — the grouped split (reused).
+
+Then evaluates the baselines on the eval test set and prints macro-F1 /
+precision / recall / per-class / top-1 / confusion matrix.
 
 Run:  PYTHONPATH=<repo> .venv_poc/bin/python -m scripts.retrain_head_dev
 """
@@ -48,6 +61,10 @@ ROOT = "dataset/FSD50K"
 SR = 32000
 WIN_S = 4.0
 WIN_N = int(WIN_S * SR)
+# v3 window policy: variants per clip and the sparse-context noise floor
+# (dB relative to the clip's RMS — quiet room tone under a dominant event).
+N_VARIANTS = 2
+SPARSE_FLOOR_DB = -35.0
 
 
 # ── data ────────────────────────────────────────────────────────────────────
@@ -110,7 +127,8 @@ class _Embedder:
         self.in_name = self.sess.get_inputs()[0].name
         self.mel = EfficientATMel(sr=SR)
 
-    def _load(self, path: Path):
+    def _load_full(self, path: Path):
+        """Load the WHOLE clip at the model SR (no cropping here)."""
         import soundfile as sf
         try:
             data, sr = sf.read(str(path), dtype="float32", always_2d=True)
@@ -121,33 +139,66 @@ class _Embedder:
             from scipy.signal import resample_poly
             g = gcd(sr, SR)
             x = resample_poly(x, SR // g, sr // g).astype("float32")
-        if len(x) < WIN_N:
-            x = np.tile(x, int(np.ceil(WIN_N / max(len(x), 1))))
-        return x[:WIN_N].astype("float32")
+        return x.astype("float32")
 
-    def embed(self, path: Path):
-        x = self._load(path)
-        if x is None:
-            return None
-        feats = self.mel(x).unsqueeze(1).detach().cpu().numpy().astype(np.float32)
+    def _embed_window(self, win: np.ndarray) -> np.ndarray:
+        feats = self.mel(win).unsqueeze(1).detach().cpu().numpy().astype(np.float32)
         out = self.sess.run([self.emb_name], {self.in_name: feats})[0]
         return np.asarray(out).reshape(-1).astype(np.float32)
 
+    def embed_variants(self, path: Path, rng: np.random.Generator):
+        """Rolling-window-consistent 4 s variants of one clip (v3 policy)."""
+        x = self._load_full(path)
+        if x is None or len(x) == 0:
+            return None
+        wins = []
+        if len(x) >= WIN_N:
+            # Long clip: random crops — the model must recognise the class
+            # from an arbitrary 4 s slice, exactly like the live rolling window.
+            for _ in range(N_VARIANTS):
+                s = int(rng.integers(0, len(x) - WIN_N + 1))
+                wins.append(x[s:s + WIN_N])
+        else:
+            # Short clip, variant A: cyclic tile from a random phase — matches
+            # the runtime partial-buffer tile-pad (noise_classifier H2 path).
+            reps = int(np.ceil(WIN_N / len(x))) + 1
+            tiled = np.tile(x, reps)
+            ph = int(rng.integers(0, len(x)))
+            wins.append(tiled[ph:ph + WIN_N])
+            # Variant B: sparse event-in-context — the clip at a random offset
+            # inside 4 s of low-level noise floor (the live-mic regime: a
+            # transient occupying a fraction of an otherwise-quiet window).
+            rms = float(np.sqrt(np.mean(x * x)) + 1e-9)
+            floor = rms * 10.0 ** (SPARSE_FLOOR_DB / 20.0)
+            buf = (floor * rng.standard_normal(WIN_N)).astype("float32")
+            off = int(rng.integers(0, WIN_N - len(x) + 1))
+            buf[off:off + len(x)] += x
+            wins.append(buf)
+        return [w.astype("float32") for w in wins]
 
-def _embed_rows(emb, rows, audio_dir: Path, name: str):
+
+def _embed_rows(emb, rows, audio_dir: Path, name: str, seed: int):
+    """One embedding per WINDOW VARIANT (v3: ≥1 per clip, usually 2).
+
+    Variant randomness is seeded per (seed, fname) via crc32 so the cache is
+    reproducible regardless of row order.
+    """
+    import zlib
     X, Y = [], []
     t0 = time.time()
     for i, (fn, tgts) in enumerate(rows):
-        v = emb.embed(audio_dir / f"{fn}.wav")
-        if v is None:
+        rng = np.random.default_rng((seed, zlib.crc32(str(fn).encode())))
+        wins = emb.embed_variants(audio_dir / f"{fn}.wav", rng)
+        if not wins:
             continue
-        X.append(v)
         y = np.zeros(len(_TARGETS), dtype="float32")
         for t in tgts:
             y[_LAB_IDX[t]] = 1.0
-        Y.append(y)
+        for w in wins:
+            X.append(emb._embed_window(w))
+            Y.append(y)
         if (i + 1) % 400 == 0:
-            print(f"    {name}: {i+1}/{len(rows)}  ({time.time()-t0:.0f}s)", flush=True)
+            print(f"    {name}: {i+1}/{len(rows)} clips → {len(X)} windows  ({time.time()-t0:.0f}s)", flush=True)
     return np.stack(X), np.stack(Y)
 
 
@@ -252,7 +303,8 @@ def _render_confusion(rep, labels):
     return "\n".join(lines)
 
 
-def evaluate_all(v2_path, args):
+def evaluate_all(head_path, args):
+    v2_path = head_path  # newest head under evaluation (v3 by default)
     from voiceiso.config import PipelineConfig
     from voiceiso.stages.noise_classifier import EfficientATNoiseClassifier, HeuristicNoiseClassifier
     from voiceiso.bench.classifier_eval import evaluate_classifier
@@ -269,12 +321,22 @@ def evaluate_all(v2_path, args):
         c.noise_classifier_model_path = path
         return EfficientATNoiseClassifier(c)
 
-    backends = {
-        "heuristic": HeuristicNoiseClassifier(cfg),
-        "pretrained-direct (527→12)": mk_eat("checkpoints/efficientat_s_4s.onnx"),
-        "deployed head v1": mk_eat("checkpoints/efficientat_head12.onnx"),
-        "NEW head v2 (dev-trained)": mk_eat(v2_path),
+    all_backends = {
+        "heuristic": lambda: HeuristicNoiseClassifier(cfg),
+        "pretrained-direct (527→12)": lambda: mk_eat("checkpoints/efficientat_s_4s.onnx"),
+        "head v1 (eval-pool)": lambda: mk_eat("checkpoints/efficientat_head12.onnx"),
+        "head v2 (dev, first-4s)": lambda: mk_eat("checkpoints/efficientat_head12_v2.onnx"),
+        "head v3 (dev, window-robust)": lambda: mk_eat(v2_path),
     }
+    sel = [s.strip() for s in (args.backends or "").split(",") if s.strip()]
+    backends = {}
+    for name, mk in all_backends.items():
+        if sel and not any(s in name for s in sel):
+            continue
+        try:
+            backends[name] = mk()
+        except Exception as exc:
+            print(f"  (skipping {name}: {type(exc).__name__}: {exc})", flush=True)
     reports = {}
     for name, clf in backends.items():
         t0 = time.time()
@@ -289,8 +351,10 @@ def evaluate_all(v2_path, args):
     for name, r in reports.items():
         print(f"  {name:<28}{r.macro_f1:>10.3f}{r.micro_acc:>8.3f}")
 
-    rep = reports["NEW head v2 (dev-trained)"]
-    print("\n  NEW head v2 — per-class (precision / recall / F1 / support):")
+    rep = reports.get("head v3 (dev, window-robust)")
+    if rep is None:
+        return reports
+    print("\n  head v3 — per-class (precision / recall / F1 / support):")
     print(f"  {'label':<18}{'P':>7}{'R':>7}{'F1':>7}{'supp':>7}")
     for lab in _TARGETS:
         m = rep.per_class.get(lab, {})
@@ -312,7 +376,10 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--hidden", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--cache", default="checkpoints/dev_emb_cache.npz")
+    ap.add_argument("--cache", default="checkpoints/dev_emb_cache_v3.npz")
+    ap.add_argument("--out", default="checkpoints/efficientat_head12_v3.onnx")
+    ap.add_argument("--backends", default="",
+                    help="comma-separated name filter for the eval table (e.g. 'v2,v3')")
     ap.add_argument("--eval-only", action="store_true")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
@@ -327,41 +394,50 @@ def main() -> int:
             Xtr, Ytr, Xva, Yva = d["Xtr"], d["Ytr"], d["Xva"], d["Yva"]
         else:
             dev_rows = _read_mapped(Path(ROOT) / "FSD50K.ground_truth" / "dev.csv")
-            up_dev = load_uploader_map(ROOT, "dev")
-            train, val = _grouped_split(dev_rows, up_dev, args.val_frac, rng)
-            # verify uploader disjointness
-            tu = {up_dev.get(f, f) for f, _ in train}; vu = {up_dev.get(f, f) for f, _ in val}
-            print(f"dev split: train={len(train)} val={len(val)}  "
-                  f"uploader overlap train∩val={len(tu & vu)} (must be 0)")
-            train = _cap_per_class(train, args.train_cap, rng)
-            val = _cap_per_class(val, args.val_cap, rng)
+            split_path = Path("checkpoints/fsd50k_split_dev.json")
+            if split_path.exists():
+                # Reuse the EXACT v2 split (same clips, same uploader grouping)
+                # so the window policy is the only variable between v2 and v3.
+                sp = json.load(open(split_path))
+                lab = {fn: t for fn, t in dev_rows}
+                train = [(f, lab[f]) for f in sp["train_fnames"] if f in lab]
+                val = [(f, lab[f]) for f in sp["val_fnames"] if f in lab]
+                print(f"reusing split {split_path}: train={len(train)} val={len(val)} clips")
+            else:
+                up_dev = load_uploader_map(ROOT, "dev")
+                train, val = _grouped_split(dev_rows, up_dev, args.val_frac, rng)
+                tu = {up_dev.get(f, f) for f, _ in train}; vu = {up_dev.get(f, f) for f, _ in val}
+                print(f"dev split: train={len(train)} val={len(val)}  "
+                      f"uploader overlap train∩val={len(tu & vu)} (must be 0)")
+                train = _cap_per_class(train, args.train_cap, rng)
+                val = _cap_per_class(val, args.val_cap, rng)
+                json.dump({"mode": "standard grouped (dev→train/val by uploader, eval→test)",
+                           "grouped_by": "uploader", "val_frac": args.val_frac,
+                           "train_fnames": [f for f, _ in train], "val_fnames": [f for f, _ in val]},
+                          open(split_path, "w"), indent=0)
             pc = defaultdict(int)
             for _f, t in train:
                 for c in t:
                     pc[c] += 1
-            print(f"  train after cap={len(train)} per-class={dict(pc)}")
-            json.dump({"mode": "standard grouped (dev→train/val by uploader, eval→test)",
-                       "grouped_by": "uploader", "val_frac": args.val_frac,
-                       "train_fnames": [f for f, _ in train], "val_fnames": [f for f, _ in val]},
-                      open("checkpoints/fsd50k_split_dev.json", "w"), indent=0)
-            print("extracting embeddings (frozen backbone via ONNX)…", flush=True)
+            print(f"  train clips={len(train)} per-class={dict(pc)}")
+            print("extracting embeddings (frozen backbone via ONNX, v3 window policy)…", flush=True)
             emb = _Embedder()
-            Xtr, Ytr = _embed_rows(emb, train, dev_dir, "train")
-            Xva, Yva = _embed_rows(emb, val, dev_dir, "val")
+            Xtr, Ytr = _embed_rows(emb, train, dev_dir, "train", args.seed)
+            Xva, Yva = _embed_rows(emb, val, dev_dir, "val", args.seed)
             np.savez(args.cache, Xtr=Xtr, Ytr=Ytr, Xva=Xva, Yva=Yva)
             print(f"  cached embeddings → {args.cache}  train{Xtr.shape} val{Xva.shape}")
 
         print("training head (frozen backbone, standardisation folded into export)…", flush=True)
         W, b, best_f1, _head, _stats = train_head(Xtr, Ytr, Xva, Yva,
                                                   args.epochs, args.lr, args.hidden, args.seed)
-        print(f"  best val top-1 macro-F1 (uploader-disjoint) = {best_f1:.3f}")
+        print(f"  best val top-1 macro-F1 (uploader-disjoint, window-robust) = {best_f1:.3f}")
         if W is None:
             print("  (MLP head — weight-swap export not supported; needs graph rebuild)")
             return 1
-        dst = export_v2(W, b)
+        dst = export_v2(W, b, dst=args.out)
         print(f"  exported → {dst}")
 
-    evaluate_all("checkpoints/efficientat_head12_v2.onnx", args)
+    evaluate_all(args.out, args)
     return 0
 
 

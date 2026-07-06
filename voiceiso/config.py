@@ -210,9 +210,12 @@ class PipelineConfig:
             ck = Path(self.checkpoint_dir)
             if not ck.is_absolute():
                 ck = repo_root / ck
-            # Prefer the dev-trained, uploader-grouped head (v2 — correct
-            # protocol) over the legacy eval-pool head (v1) when present.
-            for fname in ("efficientat_head12_v2.onnx", "efficientat_head12.onnx"):
+            # Preference order: v3 (correct protocol + rolling-window-robust
+            # training) > v2 (correct protocol, first-4s crops) > v1 (legacy
+            # eval-pool training).
+            for fname in ("efficientat_head12_v3.onnx",
+                          "efficientat_head12_v2.onnx",
+                          "efficientat_head12.onnx"):
                 candidate = ck / fname
                 if candidate.exists():
                     self.noise_classifier_model_path = str(candidate)

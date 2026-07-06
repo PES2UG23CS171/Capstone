@@ -431,37 +431,49 @@ auto-wired by `PipelineConfig` and runs at a 4 s window / 500 ms cadence; the
 zero-dependency heuristic remains the transparent fallback when the checkpoint or
 onnxruntime is absent (the fallback is logged and surfaced in `backend_summary`).
 
-**Classifier accuracy — corrected protocol (`efficientat_head12_v2.onnx`).**
+**Classifier accuracy — corrected protocol (`efficientat_head12_v3.onnx`).**
 Trained on **FSD50K.dev_audio** with an **uploader-grouped** train/val split
-(train∩val uploader overlap = 0); the frozen backbone embedding is read straight
+(train∩val uploader overlap = 0; v3 reuses v2's exact split so the window
+policy is the only variable); the frozen backbone embedding is read straight
 out of the exported ONNX and only the Linear head is trained
 (`scripts/retrain_head_dev.py`). Tested on the official held-out **FSD50K.eval**
-set (uploader-disjoint from dev by construction).
+set (uploader-disjoint from dev by construction), streamed through the runtime
+classifier.
+
+> **Harness correction:** the runtime classifier now tile-pads partial buffers
+> (≥ 1 s), so clips shorter than the 4 s window can be classified. Under the
+> old harness, 18.4 % of the test clips were *forced* misses ("clean" is never
+> a FSD50K truth label), so all previously-reported numbers were depressed —
+> v2's earlier 0.564 / 0.621 measures the same model as today's 0.635 / 0.740.
 
 | Backend | macro-F1 | top-1 |
 |---|---|---|
-| heuristic | 0.089 | 0.128 |
-| pretrained-direct (527 AudioSet → 12 map) | 0.211 | 0.258 |
-| deployed head v1 (eval-pool, **train-on-test ⇒ inflated**) | *0.636* | *0.658* |
-| **NEW head v2 (dev-trained, honest)** | **0.564** | **0.621** |
+| heuristic *(pre-fix harness)* | 0.089 | 0.128 |
+| pretrained-direct (527 AudioSet → 12 map) *(pre-fix harness)* | 0.211 | 0.258 |
+| head v1 (eval-pool, **train-on-test ⇒ inflated**) | *0.698* | *0.782* |
+| head v2 (dev-trained, first-4s crops) | 0.635 | 0.740 |
+| **head v3 (dev-trained, window-robust — deployed)** | **0.636** | **0.742** |
 
-> v1's 0.636 is **not valid** — it was trained on FSD50K eval-pool clips, so testing
-> it on eval is train-on-test. On a leakage-free set held out from *both* (n=282),
-> v1 and v2 are on par: v1 0.528 / v2 0.503 macro-F1, with v2 ahead on top-1
-> (0.589 vs 0.550). v2 is the methodologically correct, reproducible model and is
-> the deployed default. Reproduce: `python -m scripts.retrain_head_dev --eval-only`.
-> Best uploader-disjoint val macro-F1 = 0.680.
+> **v3 (window-robust training):** the live classifier sees rolling 4 s windows
+> where an event may occupy a fraction of the window at any position; v2
+> trained only on tile-first-4s crops. v3 trains on random 4 s crops (long
+> clips) plus tiled-random-phase *and* sparse event-in-context variants (short
+> clips) — same clips, same split. On event-dense full clips it ties v2; in
+> the transient regime it is markedly more robust: with a 0.5 s event at the
+> window edge (uploader-disjoint val clips), true-class posterior 0.73 → 0.89
+> and top-1 16/24 → 21/24. Best window-robust val macro-F1 = 0.683. v1's row
+> remains invalid (≈30 % of the test clips were in its training pool).
+> Reproduce: `python -m scripts.retrain_head_dev --eval-only`.
 
-> **Below the 0.70 target — bottleneck (evidenced):** it is the *frozen
-> representation*, not the head or threshold. A clean-threshold sweep is flat
-> (0.570 across 0.15→0.04); head capacity barely moves it (linear 0.676 → MLP-512
-> 0.695 val); and the worst classes are data-starved (`fan`: 64 dev clips, F1 0.34;
-> `speech` F1 0.38). Minimum-change path toward 0.70 *without* unfreezing the
-> backbone: (1) source `fan`/`hvac` from DEMAND/MUSAN and add clean speech to lift
-> the starved classes (macro-F1 is dragged by them); (2) average the backbone
-> embedding over multiple windows per clip at inference; (3) an MLP-512 head (+~0.02).
-> These stack but are unlikely to fully close the gap — ~0.70 on held-out FSD50K
-> eval needs backbone fine-tuning, which is out of scope (frozen by design).
+> **Below the 0.70 macro-F1 target — bottleneck (evidenced):** the *frozen
+> representation* plus data starvation, not the head or threshold. A
+> clean-threshold sweep is flat; head capacity barely moves it (linear → MLP-512
+> ≈ +0.02 val); and the worst classes are data-starved (`fan`: 64 dev clips,
+> F1 0.40; `wind` 0.54). Top-1 now stands at 0.742. Minimum-change path
+> *without* unfreezing the backbone: (1) source `fan`/`hvac` from DEMAND/MUSAN
+> to lift the starved classes; (2) per-class threshold calibration on a
+> stratified val split. ~0.70 macro-F1 on held-out FSD50K eval likely still
+> needs backbone fine-tuning, which is out of scope (frozen by design).
 
 **Scaffolded (interfaces + upgrade paths):** competing-speech only *flags*
 (VoiceFilter-Lite extraction is the next step); ECAPA speaker embedder is

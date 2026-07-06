@@ -32,16 +32,18 @@ def test_config_autowires_head_and_window():
     # window default must be the 4 s the shipped head was exported with.
     assert cfg.noise_classifier_window_s == 4.0
     # If a head checkpoint exists, the path must be auto-resolved (absolute) to
-    # one of the known head ONNX files (v2 preferred over v1).
+    # one of the known head ONNX files, newest protocol first (v3 > v2 > v1).
     from pathlib import Path
     ckdir = Path(__file__).resolve().parent.parent / "checkpoints"
-    if any((ckdir / f).exists() for f in ("efficientat_head12_v2.onnx", "efficientat_head12.onnx")):
+    known = ("efficientat_head12_v3.onnx", "efficientat_head12_v2.onnx",
+             "efficientat_head12.onnx")
+    present = [f for f in known if (ckdir / f).exists()]
+    if present:
         p = cfg.noise_classifier_model_path
         assert p is not None and Path(p).is_absolute()
-        assert Path(p).name in ("efficientat_head12_v2.onnx", "efficientat_head12.onnx")
-        # v2 must win when present
-        if (ckdir / "efficientat_head12_v2.onnx").exists():
-            assert Path(p).name == "efficientat_head12_v2.onnx"
+        assert Path(p).name in known
+        # The newest present head must win.
+        assert Path(p).name == present[0], (p, present)
 
 
 # ── C1: classifier reads required frames from ONNX and emits a real label ────
