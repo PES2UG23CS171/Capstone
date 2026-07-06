@@ -96,6 +96,7 @@ class StreamingPipeline:
         self.tiny_postfilter = TinyGRUPostFilter(self.cfg)
         self.postfilter = PostFilter(self.cfg)
 
+        self._nan_warned = False
         self.stages: List[Stage] = [
             self.preprocessing,
             self.aec,
@@ -167,6 +168,14 @@ class StreamingPipeline:
         # noise_class to pick its HP cutoff (default 25 Hz, or 80 Hz under
         # wind).  Pipeline writes back here so the next block sees the hint.
         self.preprocessing.set_prev_noise_class(ctx.noise_class)
+        # NaN/Inf guard: np.clip passes NaN through, so a single numerical
+        # edge case anywhere in the chain would otherwise reach the speakers.
+        if not np.all(np.isfinite(ctx.audio)):
+            if not self._nan_warned:
+                self._nan_warned = True
+                logger.warning("pipeline emitted non-finite samples — sanitised "
+                               "(this indicates a stage bug; logged once)")
+            ctx.audio = np.nan_to_num(ctx.audio, nan=0.0, posinf=1.0, neginf=-1.0)
         return ctx
 
     def process_signal(self, x: np.ndarray, block: Optional[int] = None) -> np.ndarray:
