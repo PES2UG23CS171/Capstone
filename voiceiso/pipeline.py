@@ -130,6 +130,29 @@ class StreamingPipeline:
         for s in self.stages:
             s.reset()
 
+    def warmup(self, seconds: float = 4.6) -> None:
+        """Prime every model before real-time audio starts.
+
+        First-call costs (torch graph autotune, ONNX session optimisation,
+        classifier first inference at the 4 s window fill) otherwise land on
+        the live stream: the DSP worker stalls 1–2 s, the callback plays
+        zeros, and the output queue parks at full depth — permanently
+        ratcheting mouth-to-ear latency.  Run BEFORE ``stream.start()``.
+
+        Feeds ``seconds`` of silence through the full chain (warms VAD +
+        classifier ONNX, fills the classifier window so its first inference
+        happens here, not live) and then warms the DFN3 path directly (the
+        silence blocks bypass it by design).  Deliberately does NOT reset
+        afterwards — the warmed buffers/state are the point.
+        """
+        block = int(round(self.cfg.sample_rate * 0.1))
+        zeros = np.zeros(block, dtype=np.float32)
+        for _ in range(int(np.ceil(seconds / 0.1))):
+            self.process_block(zeros)
+        warm = getattr(self.enhancement, "warmup", None)
+        if callable(warm):
+            warm()
+
     def process_block(
         self, block: np.ndarray, reference: Optional[np.ndarray] = None
     ) -> FrameContext:

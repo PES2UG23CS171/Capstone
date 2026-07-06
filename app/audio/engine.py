@@ -138,6 +138,20 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             "Install deepfilternet (+ Rust toolchain).",
         ))
 
+    # ── Warm-up (C2): prime every model BEFORE the stream starts. ────────
+    # Without this, first-call costs stall the DSP worker 1–2 s at stream
+    # start: the callback plays zeros, the input queue fills, and when the
+    # worker catches up the output queue parks at full depth — permanently
+    # ratcheting mouth-to-ear latency by up to 400 ms.  There is no drain
+    # path for that backlog other than the callback-side drain below.
+    if pipeline is not None:
+        try:
+            _t0 = time.perf_counter()
+            pipeline.warmup()
+            log.info("pipeline warm-up complete in %.2f s", time.perf_counter() - _t0)
+        except Exception:
+            log.error("pipeline warm-up failed:\n%s", traceback.format_exc())
+
     denoiser = StubDenoiser(
         model_path=cfg.model_path,
         sample_rate=cfg.sample_rate,
@@ -164,6 +178,18 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         try:
             q.put_nowait(item)
         except queue.Full:
+            pass
+
+    def _flush(q: queue.Queue) -> None:
+        """Drain a queue completely (mode/device transitions).
+
+        Without this, toggling passthrough or switching devices replays up to
+        400 ms of stale audio still parked in the queues.
+        """
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
             pass
 
     def _worker_loop() -> None:
@@ -225,10 +251,23 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             # block can't xrun the audio device — it only adds bounded latency.
             mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
             _drop_oldest_put(_proc_in, mono)
+            # Drain to the FRESHEST finished block.  In steady state the
+            # worker produces exactly one block per callback, so this takes
+            # one item.  After any stall the backlog would otherwise park at
+            # full depth forever (production and consumption are both locked
+            # to the callback cadence — there is no other drain path), adding
+            # a permanent +400 ms of latency; skipping to the freshest block
+            # snaps latency back to design in one callback.
+            latest = None
             try:
-                y, rtf = _proc_out.get_nowait()
-                current_rtf = rtf
+                while True:
+                    latest = _proc_out.get_nowait()
             except queue.Empty:
+                pass
+            if latest is not None:
+                y, rtf = latest
+                current_rtf = rtf
+            else:
                 y = np.zeros(frames, dtype=np.float32)   # warmup / brief underrun
             if len(y) < frames:
                 y = np.concatenate([y, np.zeros(frames - len(y), dtype=np.float32)])
@@ -304,6 +343,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
 
                 elif cmd.kind == CmdType.SET_ENABLED:
                     enabled = bool(cmd.value)
+                    _flush(_proc_in); _flush(_proc_out)
                     log.debug("Suppression enabled = %s", enabled)
 
                 elif cmd.kind == CmdType.SET_STRENGTH:
@@ -312,7 +352,10 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                     log.debug("Suppression strength = %.2f", strength)
 
                 elif cmd.kind == CmdType.SET_GAIN:
-                    gain_db = float(cmd.value)
+                    # Cap positive gain at +6 dB: with open speakers the
+                    # mic→speaker loop howls once loop gain exceeds unity,
+                    # and DFN3 preserves the returning speech by design.
+                    gain_db = float(np.clip(cmd.value, -60.0, 6.0))
                     gain_lin = 10.0 ** (gain_db / 20.0)
                     log.debug("Output gain = %.1f dB", gain_db)
 
@@ -322,6 +365,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                     if stream is not None:
                         stream.stop()
                         stream.close()
+                    _flush(_proc_in); _flush(_proc_out)
                     stream = _open_stream()
 
                 elif cmd.kind == CmdType.SET_OUTPUT_DEVICE:
@@ -330,10 +374,12 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                     if stream is not None:
                         stream.stop()
                         stream.close()
+                    _flush(_proc_in); _flush(_proc_out)
                     stream = _open_stream()
 
                 elif cmd.kind == CmdType.SET_PASSTHROUGH:
                     passthrough = bool(cmd.value)
+                    _flush(_proc_in); _flush(_proc_out)
                     log.info("Passthrough mode = %s", passthrough)
 
                 elif cmd.kind == CmdType.GET_DEVICES:

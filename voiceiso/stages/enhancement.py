@@ -260,6 +260,22 @@ class Enhancement(Stage):
         self._cap_relief_db = 0.0
         self._hist = np.zeros(self._hist_len, dtype=np.float32)
 
+    def warmup(self) -> None:
+        """Run DFN3 once so torch first-call costs don't hit the live stream.
+
+        The pipeline-level warm-up feeds silence, which this stage bypasses
+        (suppression ≈ 0), so DFN3's first real inference would otherwise
+        land mid-demo.  Two direct calls cover the first-call graph work.
+        ``_enhance`` only reads the history buffer, so stage state is
+        untouched.
+        """
+        if self.backend != "deepfilternet3":
+            return
+        blk = int(round(self.sr * 0.1))
+        noise = (1e-3 * np.random.default_rng(0).standard_normal(blk)).astype(np.float32)
+        for _ in range(2):
+            self._enhance(noise, atten_lim_db=100.0)
+
     def _push_hist(self, x: np.ndarray) -> None:
         if self._hist_len <= 0:
             return
