@@ -77,22 +77,30 @@ python -m scripts.retrain_head_dev --eval-only   # just the eval table
 > white-noise** condition and says so loudly — those numbers are not comparable to
 > real-corpora results.
 
-### Classifier (`efficientat_head12_v2.onnx`, corrected protocol)
+### Classifier (`efficientat_head12_v3.onnx`, corrected protocol + window-robust)
 
-Trained on **FSD50K.dev_audio** (uploader-grouped train/val), tested on the
-held-out **FSD50K.eval** set:
+Trained on **FSD50K.dev_audio** (uploader-grouped train/val, same split as v2),
+tested on the held-out **FSD50K.eval** set, streamed through the runtime
+classifier (which now tile-pads partial buffers — previously 18.4 % of test
+clips were shorter than the 4 s window and physically could not be classified,
+depressing every backend's numbers):
 
 | Backend | macro-F1 | top-1 |
 |---|---|---|
-| heuristic | 0.089 | 0.128 |
-| pretrained-direct (527→12) | 0.211 | 0.258 |
-| deployed v1 (train-on-test, inflated) | *0.636* | *0.658* |
-| **NEW v2 (dev-trained, honest)** | **0.564** | **0.621** |
+| heuristic *(pre-fix harness)* | 0.089 | 0.128 |
+| pretrained-direct 527→12 *(pre-fix harness)* | 0.211 | 0.258 |
+| head v1 (train-on-test, inflated) | *0.698* | *0.782* |
+| head v2 (dev-trained, first-4s crops) | 0.635 | 0.740 |
+| **head v3 (dev-trained, window-robust — deployed)** | **0.636** | **0.742** |
 
-v2 is the deployed default. v1's 0.636 is invalid (trained on eval clips); on a
-set held out from both, v1/v2 are on par (0.528/0.503 macro-F1, v2 better top-1).
-This is below the 0.70 target because the **frozen mn10_as embedding is the
-ceiling** (head capacity & threshold sweeps are flat); see ARCHITECTURE.md §10.
+v3 trains on rolling-window-consistent crops (random 4 s slices; short clips
+also placed sparsely in low-level context). On event-dense full clips it ties
+v2, but in the live-mic transient regime it is markedly more robust: with a
+0.5 s event at the window edge, true-class posterior 0.73 → **0.89** and top-1
+16/24 → **21/24** (uploader-disjoint val clips). v1's row is invalid (30 % of
+the test clips were in its training pool). The remaining gap to the 0.70
+macro-F1 target is the **frozen mn10_as embedding ceiling** plus data-starved
+classes (`fan`: 64 dev clips → F1 0.40); see ARCHITECTURE.md §10.
 
 ## Tests
 
