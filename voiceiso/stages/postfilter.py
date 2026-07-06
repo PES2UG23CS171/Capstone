@@ -68,9 +68,14 @@ class PostFilter(Stage):
         self._cn_b, self._cn_a = _CLASS_CN_FILTER["clean"]
         self._cn_zi = np.zeros(max(len(self._cn_a), len(self._cn_b)) - 1, dtype=np.float64)
         self._rng = np.random.default_rng(1234)
+        # Previous block's residual-gate gain — start point of this block's
+        # per-sample ramp (the gate previously stepped up to −13 dB at every
+        # is_speech flip: audible pumping at each utterance boundary).
+        self._gate_prev = 1.0
 
     def reset(self) -> None:
         self._cn_zi[:] = 0.0
+        self._gate_prev = 1.0
 
     def _select_cn_filter(self, noise_class: str) -> None:
         """Swap comfort-noise colour when the class changes."""
@@ -133,10 +138,21 @@ class PostFilter(Stage):
         # of the injected ambience tracks the room's character.
         self._select_cn_filter(ctx.noise_class)
 
-        # 1. Residual attenuation in non-speech frames only.
+        # 1. Residual attenuation in non-speech frames only — ramped per
+        #    sample from the previous block's gain so the gate GLIDES across
+        #    the block instead of stepping at its edge (with strength 0.9 the
+        #    step was −13 dB: audible pumping at every speech offset/onset).
         if not ctx.is_speech and ctx.postfilter_strength > 0.0:
-            g = 1.0 - ctx.postfilter_strength * (1.0 - self._floor_lin)
-            x = x * np.float32(g)
+            g_target = 1.0 - ctx.postfilter_strength * (1.0 - self._floor_lin)
+        else:
+            g_target = 1.0
+        if abs(g_target - self._gate_prev) > 1e-6:
+            gain = np.linspace(self._gate_prev, g_target, n,
+                               endpoint=True).astype(np.float32)
+            x = x * gain
+        elif g_target != 1.0:
+            x = x * np.float32(g_target)
+        self._gate_prev = g_target
 
         # 2. Class-shaped, level-adapted comfort noise.  Boost the level when
         #    AEC + NLES are aggressively suppressing echo (echo_conf high) and
