@@ -48,6 +48,31 @@ def _peak_rss_mb() -> float:
     return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024  # bytes vs KB
 
 
+def _align_to_ref(ref: np.ndarray, x: np.ndarray, max_lag: int = 64) -> Tuple[np.ndarray, int]:
+    """Time-align ``x`` to ``ref`` before intrusive scoring.
+
+    The pipeline can delay its output by a few samples (e.g. the multi-band
+    FIR's 15-sample group delay engages whenever a band gain != 1).  SI-SDR is
+    exquisitely delay-sensitive — a 15-sample shift alone caps it at ≈ −5 dB —
+    so without alignment the metric measures the delay, not the enhancement.
+    Estimates the lag by cross-correlation restricted to ±``max_lag`` samples
+    and shifts ``x`` (zero-padding the tail) to compensate.
+
+    Returns (aligned_x, lag) where lag > 0 means ``x`` lagged ``ref``.
+    """
+    from scipy.signal import correlate
+    n = min(len(ref), len(x))
+    c = correlate(x[:n].astype(np.float64), ref[:n].astype(np.float64),
+                  mode="full", method="fft")
+    mid = n - 1
+    lag = int(np.argmax(c[mid - max_lag: mid + max_lag + 1])) - max_lag
+    if lag > 0:      # x is delayed → advance it
+        x = np.concatenate([x[lag:], np.zeros(lag, dtype=x.dtype)])
+    elif lag < 0:    # x is early → delay it
+        x = np.concatenate([np.zeros(-lag, dtype=x.dtype), x[:lag]])
+    return x, lag
+
+
 def _agg(vals: List[float]) -> Dict[str, float]:
     """mean / p50 / p95 of a list (empty → zeros)."""
     if not vals:
@@ -73,6 +98,8 @@ class BenchResult:
     label: str = ""
     n_pairs: int = 0
     block_ms: float = 0.0      # block size the pipeline was driven at
+    # Estimated output/reference lag (samples), corrected before scoring.
+    align_lag: Dict[str, float] = field(default_factory=dict)
 
     def report(self) -> str:
         q = self.quality
@@ -88,6 +115,9 @@ class BenchResult:
                   "corr_out", "pesq_in", "pesq_out", "stoi_out"):
             if k in q:
                 lines.append(f"  {k:<18} : {q[k]:+.3f}")
+        if self.align_lag:
+            lines.append(f"  align lag (samp)   : mean {self.align_lag['mean']:+.1f}  "
+                         f"max|.| {self.align_lag['max_abs']}  (corrected before scoring)")
         if self.dnsmos:
             for sub in ("sig", "bak", "ovrl"):
                 if sub in self.dnsmos:
@@ -152,6 +182,7 @@ def run_benchmark(pairs: List[Tuple[np.ndarray, np.ndarray]], sr: int = 48_000,
     si_in, si_out, seg_out, corr_out = [], [], [], []
     pesq_in, pesq_out, stoi_out = [], [], []
     dns_sig, dns_bak, dns_ovrl = [], [], []
+    align_lags: List[int] = []
     per_block_ms: List[float] = []
     total_audio = 0.0
     t_proc = 0.0       # wall-clock spent in the pipeline
@@ -171,6 +202,9 @@ def run_benchmark(pairs: List[Tuple[np.ndarray, np.ndarray]], sr: int = 48_000,
         t_proc += time.perf_counter() - t0
         cpu_proc += time.process_time() - c0
         total_audio += len(noisy) / sr
+
+        out, lag = _align_to_ref(clean, out)
+        align_lags.append(lag)
 
         mi = M.all_metrics(clean, noisy, sr)
         mo = M.all_metrics(clean, out, sr)
@@ -195,6 +229,11 @@ def run_benchmark(pairs: List[Tuple[np.ndarray, np.ndarray]], sr: int = 48_000,
 
     if dns_sig:
         res.dnsmos = {"sig": _agg(dns_sig), "bak": _agg(dns_bak), "ovrl": _agg(dns_ovrl)}
+
+    if align_lags:
+        la = np.asarray(align_lags)
+        res.align_lag = {"mean": float(np.mean(la)),
+                         "max_abs": int(np.max(np.abs(la)))}
 
     res.rtf = t_proc / max(total_audio, 1e-9)
     # CPU utilisation: CPU-seconds in the pipeline / wall-seconds in the
