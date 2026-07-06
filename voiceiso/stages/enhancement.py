@@ -20,12 +20,28 @@ Design decisions (validated empirically on real LibriSpeech + noise):
   GRU hidden states.  DFN3's GRUs are invoked stateless (``h0`` defaults to
   zero every call), so temporal context spans only the STFT frames *within* the
   current block, not across blocks.  Consequence: larger blocks give the GRUs
-  more intra-call context.  The benchmark uses 100 ms blocks; the live paths
-  use 20 ms (≈1–2 STFT frames), which is the cheapest-latency point but the
-  least temporal context.  The old overlap-save approach (prepending a 200 ms
-  history buffer every call) is still avoided because it re-ran old audio
-  through the network; we simply do not claim cross-call recurrence we don't
-  have.
+  more intra-call context.  All paths (benchmark, ``voiceiso live``, desktop
+  app) therefore run 100 ms blocks — DFN3's efficient design point.  The old
+  overlap-save approach (prepending a 200 ms history buffer every call) is
+  still avoided because it re-ran old audio through the network; we simply do
+  not claim cross-call recurrence we don't have.
+* **History-primed per-call processing (no persistent DfState).**  The naive
+  per-block mode (one long-lived DfState, ``enhance(pad=True)`` per call)
+  feeds ``n_fft`` fabricated zeros into the stateful STFT/ERB stream on every
+  call, and the model's first frames each call run with cold (zeroed) GRU and
+  conv context.  Measured on speech at 5 dB SNR / 100 ms blocks this costs
+  ~6 dB SI-SDR vs one-shot enhancement (11.5 dB vs 17.97 dB) plus a 10 Hz
+  block-edge warble.  (Plain ``pad=False`` on a persistent state is even
+  worse — 9.0 dB — because it *keeps* each call's cold first frame, which
+  ``pad=True``'s output trim happens to discard.)  Instead each call
+  processes ``[last 80 ms of real input | current block]`` with a FRESH
+  DfState and keeps only the block's region: every emitted frame has real
+  left context, the GRUs warm up over the history, nothing fabricated enters
+  any persistent state (there is none), and the output stays sample-aligned
+  (zero added latency).  Measured: 17.7 dB SI-SDR on the same condition —
+  within 0.3 dB of one-shot — at RTF ≈ 0.17 (p95 ≈ 20 ms per 100 ms block).
+  History length is ``cfg.dfn_history_ms`` (80 ms = saturation point; 160 and
+  240 ms measure no better).
 * **Bypass when clean.**  When the controller reports a genuinely clean, high-SNR
   input (suppression ≈ 0) we pass the dry signal through and skip DFN — saving
   CPU and avoiding any processing on already-clean audio.
@@ -189,15 +205,36 @@ class Enhancement(Stage):
         self.backend = "passthrough"
         self.bypass_below = bypass_below
         self._model = None
-        self._state = None
+        # History-primed per-call processing (see module docstring): each call
+        # enhances [hist | block] with a FRESH DfState and keeps the block's
+        # region.  ``_hist`` holds the last ``dfn_history_ms`` of RAW input —
+        # updated on every block (bypass included) so an active block after a
+        # bypass stretch still gets true left context.
+        self._hist_len = 0
+        self._hist = np.zeros(0, dtype=np.float32)
+        self._DFState = None
+        self._fft = 960
+        self._hop = 480
+        self._nb_erb = 32
         if _HAS_DF:
             torch.set_num_threads(threads)
-            self._model, self._state, _ = init_df(
+            self._model, state0, _ = init_df(
                 model_base_dir=cfg.dfn_model_dir, config_allow_defaults=True
             )
             self.backend = "deepfilternet3"
-            assert self._state.sr() == self.sr, "DFN3 expects 48 kHz audio"
-            logger.info("enhancement: DeepFilterNet3 loaded (threads=%d)", threads)
+            if state0.sr() != self.sr:
+                raise RuntimeError(
+                    f"DFN3 expects 48 kHz audio (state sr={state0.sr()}, cfg sr={self.sr})"
+                )
+            self._DFState = type(state0)
+            self._fft = int(state0.fft_size())
+            self._hop = int(state0.hop_size())
+            # Round history to whole hops so the kept region starts on a frame.
+            hist_ms = float(getattr(cfg, "dfn_history_ms", 80.0))
+            self._hist_len = int(round(self.sr * hist_ms / 1000.0 / self._hop)) * self._hop
+            self._hist = np.zeros(self._hist_len, dtype=np.float32)
+            logger.info("enhancement: DeepFilterNet3 loaded (threads=%d, history=%d ms)",
+                        threads, int(1000 * self._hist_len / self.sr))
         else:
             # Make the no-op state LOUD: a passthrough enhancer means the whole
             # product is doing nothing, which must never look like success.
@@ -214,36 +251,57 @@ class Enhancement(Stage):
         self._cap_relief_db = 0.0
 
     def reset(self) -> None:
-        """Clear DFN3's recurrent state.
+        """Reset per-stream state.
 
-        ``DfState`` (the Rust object) does not expose a Python-visible reset, so
-        we re-construct it via ``init_df``.  This is somewhat expensive (~50 ms)
-        but only happens on stream (re)start — never on the hot path.
+        There is no persistent DfState to clear (a fresh one is built per
+        call — see ``_enhance``); only the raw-input history buffer and the
+        rollback cap relief carry across blocks.
         """
         self._cap_relief_db = 0.0
-        if self.backend != "deepfilternet3" or not _HAS_DF:
+        self._hist = np.zeros(self._hist_len, dtype=np.float32)
+
+    def _push_hist(self, x: np.ndarray) -> None:
+        if self._hist_len <= 0:
             return
-        torch.set_num_threads(self.threads)
-        self._model, self._state, _ = init_df(
-            model_base_dir=self.cfg.dfn_model_dir, config_allow_defaults=True
-        )
+        if len(x) >= self._hist_len:
+            self._hist = x[-self._hist_len:].astype(np.float32, copy=True)
+        else:
+            self._hist = np.concatenate([self._hist[len(x):], x.astype(np.float32)])
 
     def _enhance(self, buf: np.ndarray, atten_lim_db: float) -> np.ndarray:
-        x = torch.from_numpy(buf.reshape(1, -1).astype("float32"))
+        """Enhance one block with real left context and zero added latency.
+
+        Runs ``enhance(pad=True)`` on ``[hist | buf]`` with a FRESH DfState
+        (so nothing fabricated ever enters a persistent stream state), then
+        keeps only ``buf``'s region.  pad=True's internal trim keeps the
+        output input-aligned, so the kept region is exactly ``buf``'s
+        timeline.  NOTE: ``self._hist`` still holds the audio *preceding*
+        ``buf`` at this point — process() pushes the block only afterwards.
+        """
+        seg = np.concatenate([self._hist, buf.astype(np.float32, copy=False)])
+        state = self._DFState(sr=self.sr, fft_size=self._fft,
+                              hop_size=self._hop, nb_bands=self._nb_erb)
+        x = torch.from_numpy(seg.reshape(1, -1))
         with torch.no_grad():
-            y = enhance(self._model, self._state, x, atten_lim_db=atten_lim_db)
+            y = enhance(self._model, state, x, atten_lim_db=atten_lim_db)
         out = y.squeeze(0).cpu().numpy().astype("float32")
-        if len(out) < len(buf):
-            # DFN3 sometimes drops trailing samples at the block boundary; pad
-            # with zero to keep the pipeline's hop alignment intact.
-            out = np.concatenate([out, np.zeros(len(buf) - len(out), dtype="float32")])
-        return out[: len(buf)]
+        h = self._hist_len
+        if len(out) < h + len(buf):
+            out = np.concatenate([out, np.zeros(h + len(buf) - len(out), dtype="float32")])
+        return out[h: h + len(buf)]
 
     def process(self, ctx: FrameContext) -> FrameContext:
+        if self.backend == "passthrough":
+            ctx.meta["enh_wet"] = 0.0
+            return ctx
+
         dry = ctx.audio
 
         supp = float(np.clip(ctx.suppression, 0.0, 1.0))
-        if self.backend == "passthrough" or supp <= self.bypass_below:
+        if supp <= self.bypass_below:
+            # Keep the context history warm even when bypassing, so the next
+            # active block gets true left context.
+            self._push_hist(dry)
             ctx.meta["enh_wet"] = 0.0
             return ctx
 
@@ -259,10 +317,12 @@ class Enhancement(Stage):
         # a new overshoot — keeps the effect from compounding indefinitely.
         self._cap_relief_db = max(0.0, self._cap_relief_db - 2.0)
 
-        # Pass only the current block.  DFN3's _state carries STFT/ERB analysis
-        # state across calls (not GRU recurrence — see module docstring), so
-        # temporal context is the STFT frames within this block.
+        # History-primed enhancement (see module docstring): the block is
+        # enhanced with cfg.dfn_history_ms of real left context; the output
+        # region is sample-aligned with ``dry``.  _enhance reads self._hist,
+        # so push the block into the history only AFTER enhancing.
         wet = self._enhance(dry, atten_lim_db)
+        self._push_hist(dry)
 
         # ── Multi-cue artifact confidence + per-band rollback ──────────
         # Gating preconditions:

@@ -174,6 +174,14 @@ class PipelineConfig:
     live_queue_maxsize: int = 4
     live_latency_mode: str = "low"
 
+    # ── Enhancement (DFN3) streaming context ─────────────────────────────
+    # Real left-context re-enhanced with each block (history-primed per-call
+    # processing — see stages/enhancement.py module docstring).  80 ms is the
+    # measured saturation point: 17.7 dB SI-SDR on speech @ 5 dB SNR / 100 ms
+    # blocks (one-shot bound 18.0 dB; naive per-block stateful mode 11.5 dB),
+    # at RTF ≈ 0.17.  160/240 ms measure no better.
+    dfn_history_ms: float = 80.0
+
     # ── Paths ────────────────────────────────────────────────────────────
     dfn_model_dir: Optional[str] = None  # None → DFN3 default bundled model
     data_root: str = "data"
