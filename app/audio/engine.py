@@ -192,7 +192,11 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         except queue.Empty:
             pass
 
+    worker_errors = 0
+    worker_err_last_log = 0.0
+
     def _worker_loop() -> None:
+        nonlocal worker_errors, worker_err_last_log
         while _worker_alive.is_set():
             try:
                 block = _proc_in.get(timeout=0.1)
@@ -209,7 +213,22 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                 rtf = (time.perf_counter() - t0) / budget if budget > 0 else 0.0
                 _drop_oldest_put(_proc_out, (wet, rtf))
             except Exception:
-                log.error("DSP worker process_block failed:\n%s", traceback.format_exc())
+                # Containment: emit the DRY block (passthrough beats silence)
+                # so the demo keeps producing audio; tell the GUI once and
+                # rate-limit the traceback (it previously spammed every 100 ms).
+                worker_errors += 1
+                if worker_errors == 1:
+                    evt_q.put(Event(
+                        EvtType.ERROR,
+                        "Pipeline error — passing mic audio through unprocessed "
+                        "for affected blocks (see engine log).",
+                    ))
+                now = time.monotonic()
+                if now - worker_err_last_log >= 5.0:
+                    worker_err_last_log = now
+                    log.error("DSP worker process_block failed (%d so far):\n%s",
+                              worker_errors, traceback.format_exc())
+                _drop_oldest_put(_proc_out, (block.astype(np.float32, copy=False), 0.0))
 
     _worker: Optional[threading.Thread] = None
     if pipeline is not None:

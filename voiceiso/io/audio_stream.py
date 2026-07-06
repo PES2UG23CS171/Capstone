@@ -47,6 +47,8 @@ class LiveStream:
         # Telemetry: how many input/output drops we've taken (visible to caller).
         self.drops_in = 0
         self.drops_out = 0
+        # Pipeline exceptions contained by the worker (dry-block fallbacks).
+        self.worker_errors = 0
 
     @staticmethod
     def _put_drop_oldest(q: queue.Queue, item) -> int:
@@ -71,8 +73,20 @@ class LiveStream:
                 block = self._in_q.get(timeout=0.1)
             except queue.Empty:
                 continue
-            ctx = self.pipe.process_block(block)
-            self.drops_out += self._put_drop_oldest(self._out_q, ctx.audio)
+            try:
+                out = self.pipe.process_block(block).audio
+            except Exception:  # noqa: BLE001
+                # Containment: one bad block must NOT kill the worker thread —
+                # that would leave the stream "alive" playing silence forever.
+                # Emit the dry input (passthrough beats silence) and continue.
+                self.worker_errors += 1
+                if self.worker_errors == 1 or self.worker_errors % 100 == 0:
+                    import traceback
+                    print(f"voiceiso live: pipeline error #{self.worker_errors} — "
+                          f"emitting DRY audio for this block\n{traceback.format_exc()}",
+                          flush=True)
+                out = block
+            self.drops_out += self._put_drop_oldest(self._out_q, out)
 
     def _callback(self, indata, outdata, frames, time_info, status):  # pragma: no cover
         mono = indata[:, 0].copy()
@@ -133,3 +147,6 @@ class LiveStream:
         if self.drops_in or self.drops_out:
             print(f"voiceiso live: drops_in={self.drops_in} drops_out={self.drops_out}"
                   " (consider increasing live_queue_maxsize or latency='high')")
+        if self.worker_errors:
+            print(f"voiceiso live: {self.worker_errors} pipeline errors were contained "
+                  "(dry audio emitted for those blocks) — see traceback above")
