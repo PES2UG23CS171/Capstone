@@ -16,7 +16,7 @@ passes, a training/deployment review, and a benchmarking framework.
 
 | Theme | Outcome |
 |---|---|
-| **Latency** | Overlap-save context buffer removed; true stateful DFN3 streaming at 20 ms blocks. End-to-end ~100 ms → ~20–25 ms. |
+| **Latency** | Overlap-save context buffer removed. *(Correction: the "stateful 20 ms streaming" this report originally claimed was wrong — DFN3's GRUs are stateless across calls and 20 ms blocks measure negative SI-SDRi. Shipped design: 100 ms blocks on a worker thread + history-primed per-call DFN3; end-to-end ≈ 200–300 ms.)* |
 | **Controller** | Binary on/off suppression → graduated (smooth SNR base, VAD-prob speech cap, per-class release, per-band gains). |
 | **Noise classification** | Heuristic kept as fallback; learned EfficientAT-S ONNX wired as primary path (graceful fallback). |
 | **Competing speech** | From *flag-only* → ECAPA speaker similarity + VoiceFilter-Lite mask scaffold + mid-band gating. |
@@ -58,9 +58,14 @@ prepended a 200 ms history buffer on every `enhance()` call, forcing DFN3 to
 re-process old audio through its recurrent layers — double the compute and a
 correctness smell (the GRU state was already conditioned on that context).
 
-**Fix:** DFN3's `_state` object already carries GRU hidden state across calls.
-Pass only the *new* block per call. This halved compute and unlocked 20 ms
-blocks. End-to-end latency dropped to ~20–25 ms.
+**Fix (as shipped, corrected):** the original fix here claimed `_state`
+carries GRU hidden state across calls — that is FALSE (it carries only
+STFT/ERB analysis state; the GRUs run stateless with `h0=0` per call).
+Passing only the new block per call did remove the double compute, but
+20 ms blocks starve DFN3 of temporal context (measured negative SI-SDRi)
+and were abandoned. Shipped design: 100 ms blocks, history-primed per-call
+processing (80 ms of real left context, fresh DfState per call) — 17.7 dB
+SI-SDR on speech @ 5 dB vs 11.5 dB naive per-block.
 
 ### 2.2 Other V1 weaknesses identified
 
@@ -87,7 +92,7 @@ blocks. End-to-end latency dropped to ~20–25 ms.
 - **Noise classifier** — fixed the dead flux branch (compare flux to its own
   running EMA, not to `mag.mean()`); EWMA prob smoothing; high-VAD
   competing-speech branch (centroid drift); `noise_conf` exposed.
-- **Block size** 100 ms → 20 ms across `LiveStream`, app config, offline path.
+- **Block size** — settled at 100 ms across `LiveStream`, app config, offline path (an interim 20 ms experiment was reverted: DFN3 quality collapses below ~100 ms per-call context).
 
 ### 3.2 Speech understanding & preservation
 
@@ -245,7 +250,8 @@ targets):
 | corr (output vs clean) | ~0.85–0.87 |
 | RTF (passthrough) | ~0.01 |
 | RTF (DFN3 active, V1 measured) | ~0.21 |
-| Algorithmic latency | 20 ms |
+| Algorithmic latency (STFT framing only) | 20 ms |
+| End-to-end mouth-to-ear (100 ms blocks + queue + device) | ≈ 200–300 ms |
 | Block latency p99 | ~1.4 ms (passthrough) |
 | Peak RAM (no DFN3) | ~300 MB |
 
@@ -260,7 +266,7 @@ buckets correctly and skips unmatched classes.
 ## 7. Consolidated MUST / SHOULD / OPTIONAL
 
 ### MUST (implemented)
-1. Stateful DFN3 streaming at 20 ms blocks (latency).
+1. 100 ms worker-thread streaming with history-primed per-call DFN3 (the originally-planned "stateful 20 ms streaming" is impossible — DFN3's GRUs are stateless across calls).
 2. Graduated multi-band controller.
 3. EfficientAT classifier path with heuristic fallback.
 4. AEC double-talk detection + NLES + delay calibration.

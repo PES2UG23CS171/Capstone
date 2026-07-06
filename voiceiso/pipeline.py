@@ -181,10 +181,13 @@ class StreamingPipeline:
     def process_signal(self, x: np.ndarray, block: Optional[int] = None) -> np.ndarray:
         """Offline helper: stream a whole signal through in blocks.
 
-        Default block size matches the live-streaming block (20 ms) so offline
-        results are representative of real-time behaviour.
+        Default block size is 100 ms — the SAME operating point as the live
+        paths (LiveStream, desktop app) and the benchmark, so offline results
+        are representative of real-time behaviour.  (20 ms blocks give DFN3
+        so little per-call context that SI-SDRi goes negative — never the
+        default.)
         """
-        block = block or self.cfg.hop * 2            # 20 ms default (2 × 10 ms hop)
+        block = block or int(round(self.cfg.sample_rate * 0.1))   # 100 ms
         out = np.zeros(len(x), dtype=np.float32)
         for s in range(0, len(x), block):
             seg = x[s : s + block]

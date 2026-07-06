@@ -6,9 +6,12 @@ f# voiceiso — Architecture & Function Reference
 > preprocessing, AEC, VAD, noise classification, a dynamic suppression
 > controller, speech preservation, and a residual post-filter.
 >
-> **Version 2** (current): stateful DFN3 streaming at 20 ms blocks (latency
-> 100 ms → ~20–25 ms), graduated suppression controller, and EWMA-smoothed
-> noise classifier.
+> **Version 2** (current): 100 ms blocks on a dedicated DSP worker thread
+> (xrun-safe callback), history-primed per-call DFN3 (80 ms of real left
+> context re-enhanced each call — no cross-call GRU state is possible with
+> DFN3's stateless-GRU invocation), graduated suppression controller, and an
+> EWMA-smoothed learned noise classifier.  End-to-end mouth-to-ear latency
+> ≈ 200–300 ms (block fill + one queue hop + device I/O).
 
 All numbers in this document were **measured** on this machine (Apple-silicon
 CPU), not estimated. See [§9 Results](#9-measured-results).
@@ -36,15 +39,20 @@ Four principles, each forced on us by measurement or architectural critique:
    `h0`=0 each call), so temporal context spans only the STFT frames *within*
    the block. We still avoid the old V1 look-back buffer (which re-ran 200 ms of
    history through the network), but we do **not** claim cross-call recurrence we
-   don't have. Practical consequence: larger blocks give DFN3 more context — the
-   benchmark uses 100 ms blocks, the live paths 20 ms.
+   don't have. Practical consequence: larger blocks give DFN3 more context —
+   ALL paths (benchmark, `voiceiso live`, desktop app, offline `enhance`) use
+   100 ms blocks, and the enhancement stage additionally re-enhances the last
+   80 ms of real input with each block (history-primed per-call processing,
+   fresh DfState per call) so every emitted frame has warm GRU/conv context.
+   Measured on speech @ 5 dB SNR: 17.7 dB SI-SDR vs 11.5 dB for naive
+   per-block stateful mode (one-shot bound 18.0 dB).
 
 ---
 
 ## 2. Pipeline overview
 
 ```
- mic block (20 ms @ 48 kHz)
+ mic block (100 ms @ 48 kHz)
    │
    ▼
  Preprocessing      DC/subsonic block + running SNR estimate
@@ -68,7 +76,7 @@ Four principles, each forced on us by measurement or architectural critique:
  SpeechPreservation detect consonants → protect from the post-filter
    │
    ▼
- Enhancement (DFN3) stateful streaming (GRU state); controller-steered; bypass-when-clean
+ Enhancement (DFN3) history-primed per-call (80 ms real context); controller-steered; bypass-when-clean
    │
    ▼
  PostFilter         residual gate in gaps + comfort-noise injection
@@ -78,9 +86,9 @@ Four principles, each forced on us by measurement or architectural critique:
 ```
 
 Every box is a `Stage` that reads/annotates a shared `FrameContext` and keeps its
-own streaming state across blocks. Measured end-to-end: **RTF ≈ 0.21** (100 ms
-blocks, V1). V2 targets ~20–25 ms end-to-end at 20 ms blocks with stateful
-DFN3 streaming.
+own streaming state across blocks. Measured RTF ≈ 0.17 when DFN3 is active
+(100 ms blocks + 80 ms history). End-to-end latency budget: 100 ms block fill
++ one queue hop (≤ 100 ms) + device I/O — ≈ 200–300 ms mouth-to-ear.
 
 ---
 
@@ -146,8 +154,9 @@ operation.
 | `aec_filter_ms` | 200 | AEC adaptive-filter tail length |
 
 **Properties** (derived): `hop`, `win`, `lookahead` (samples); `algorithmic_latency_ms`
-= `hop_ms + (win_ms − hop_ms) + lookahead_ms` = 20 ms (STFT-frame latency; with V2
-stateful streaming the end-to-end latency matches this — ~20–25 ms).
+= `hop_ms + (win_ms − hop_ms) + lookahead_ms` = 20 ms — STFT-framing latency only.
+It deliberately EXCLUDES the dominant real-world terms: the 100 ms block fill,
+the worker-queue hop, and device I/O. End-to-end mouth-to-ear ≈ 200–300 ms.
 
 ### `voiceiso/stages/base.py`
 
@@ -300,10 +309,13 @@ post-filter (DFN already preserves them, so it does **not** throttle the enhance
   - **bypass** (passthrough dry, skip the net) when backend is passthrough **or**
     `suppression ≤ bypass_below` (controller says clean) — saves CPU;
   - else maps `suppression → atten_lim_db ∈ [12, 100]` (gentle…aggressive), calls
-    `_enhance(dry)` with only the **current block** — DFN3's `_state` carries GRU
-    hidden states from all prior blocks (true stateful streaming, no context buffer).
-    Output is **fully wet**. Writes `enh_wet` / `enh_atten_db` meta.
-- **`reset()`** — calls `_state.reset()` to clear DFN's recurrent state.
+    `_enhance` on `[last 80 ms of real input | current block]` with a FRESH
+    DfState per call and keeps the block's region — every emitted frame gets
+    real left context and warmed (per-call) GRUs; DFN3's GRUs hold **no**
+    cross-call state. Output is **fully wet**. Writes `enh_wet` /
+    `enh_atten_db` meta.
+- **`reset()`** — zeroes the raw-input history buffer (there is no persistent
+  DfState to clear).
 
 > Streaming: passing only the new block per call eliminates the V1 overlap-save
 > overhead (which reprocessed 200 ms of history every block). Note DFN3's `_state`
@@ -458,16 +470,19 @@ passthrough until a model is provided.
 **Known caveats:**
 - Live mic path is wired but **unverified** here (no audio device) — validate on a real
   machine.
-- `algorithmic_latency_ms` (20 ms) reflects STFT framing; **real latency ≈ 20–25 ms**
-  with V2 stateful streaming at 20 ms blocks.
+- `algorithmic_latency_ms` (20 ms) reflects STFT framing only; **real
+  mouth-to-ear latency ≈ 200–300 ms** (100 ms blocks + worker-queue hop +
+  device I/O).
 - DFN3 needs a **Rust toolchain** to build, a **torchaudio compat shim**
   (`voiceiso/_compat.py`), and pins **numpy < 2**.
 - SI-SDRi (~8 dB) is below the aspirational 10 dB target on the hardest white-noise
   case; PESQ gain (+0.85) is solid.
 
-**Implemented in V2:** (1) stateful DFN3 streaming at 20 ms blocks (latency 100 → 20 ms);
-(2) graduated suppression controller with per-class release times; (3) EWMA frame
-smoothing + flux-threshold bug fix in the noise classifier.
+**Implemented in V2:** (1) 100 ms worker-thread streaming with history-primed
+per-call DFN3 (the earlier "stateful 20 ms streaming" claim was wrong — DFN3's
+GRUs are invoked stateless; 20 ms blocks measure NEGATIVE SI-SDRi and were
+abandoned); (2) graduated suppression controller with per-class release times;
+(3) EWMA frame smoothing + flux-threshold bug fix in the noise classifier.
 
 **Remaining next steps:** (1) learned noise classifier (YAMNet / EfficientAT ONNX);
 (2) VoiceFilter-Lite target-speaker extraction; (3) export DFN to ONNX + INT8 to cut

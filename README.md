@@ -48,7 +48,19 @@ python -m app.main                              # desktop app (GUI + tray)
 The live paths run DFN3 at **100 ms blocks on a worker thread** (DFN3's efficient
 design point; it has no cross-call GRU memory, so 20 ms blocks measurably degrade
 quality — see ARCHITECTURE.md §1.4). The audio callback never runs the network,
-so it is xrun-safe.
+so it is xrun-safe. All models are warmed up before the stream starts, and the
+callback drains to the freshest processed block, so mouth-to-ear latency stays at
+the ~200–300 ms design point instead of ratcheting after load spikes.
+
+### Live-demo checklist
+
+- **Use headphones** (or a headset). AEC is off by default and mic→speaker
+  loopback echoes the presenter's voice back — DFN3 *preserves* speech by design.
+- **Use a wired 48 kHz-capable microphone.** Bluetooth HFP mics run at 8/16 kHz
+  and can fail to open (the app streams fixed 48 kHz).
+- Connect all audio devices **before** launching the app (the device list is a
+  startup snapshot).
+- Output gain is capped at +6 dB; the strength slider is the demo control.
 
 ## Benchmarks (reproducible)
 

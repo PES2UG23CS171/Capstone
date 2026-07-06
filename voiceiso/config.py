@@ -2,13 +2,17 @@
 Unified configuration for the voiceiso real-time pipeline.
 
 Frame geometry is chosen to match DeepFilterNet3's native 48 kHz / 10 ms-hop
-operation so the enhancement core runs at its design point, while keeping
-algorithmic latency low enough for conferencing.
+operation so the enhancement core runs at its design point.
 
-Latency budget (algorithmic, excluding device I/O)::
+Latency accounting (honest):
 
-    frame hop (10 ms) + STFT window overhang (10 ms) + optional lookahead (0–10 ms)
-    ≈ 20–30 ms   — comparable to Krisp's "low" mode.
+    STFT framing (``algorithmic_latency_ms``): hop (10 ms) + window overhang
+    (10 ms) + optional lookahead ≈ 20 ms.  This is NOT the end-to-end number.
+
+    The live paths process 100 ms blocks on a worker thread (DFN3's GRUs are
+    stateless across calls, so per-call context ~100 ms is the quality design
+    point).  End-to-end mouth-to-ear = 100 ms block fill + one queue hop
+    (≤ 100 ms) + device I/O ≈ **200–300 ms**.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ class PipelineConfig:
     vad_hangover_ms: float = 200.0     # default hangover (vowel-ending case)
     # Adaptive threshold (track running percentiles of vad_prob over ~30 s).
     vad_adaptive: bool = True
-    vad_adapt_alpha: float = 1.0 / 1500.0  # EWMA α — 30 s @ 20 ms blocks
+    vad_adapt_alpha: float = 1.0 / 1500.0  # per-call EWMA α (≈150 s @ 100 ms blocks)
     vad_threshold_min: float = 0.35
     vad_threshold_max: float = 0.65
     # Adaptive hangover: short when speech ended on a fricative (HF-dominant
@@ -167,10 +171,11 @@ class PipelineConfig:
     # Trade-off:  small queue + latency='low' → minimum end-to-end delay but
     #             intolerant of CPU bursts (xrun → silent drop).
     #             Larger queue + latency='high' → more delay but smoother.
-    # Defaults pick a middle ground: 4-deep queue (~80 ms of slack at 20 ms
+    # Defaults pick a middle ground: 4-deep queue (400 ms of slack at 100 ms
     # blocks) with latency='low'.  V1 used 16-deep + 'high' which silently
     # ballooned latency to 1.6 s under load; V2-α used 2-deep + 'low' which
-    # was too tight on stock laptops.
+    # was too tight on stock laptops.  The callback drains the OUTPUT queue
+    # to the freshest block, so queue depth adds slack, not steady latency.
     live_queue_maxsize: int = 4
     live_latency_mode: str = "low"
 

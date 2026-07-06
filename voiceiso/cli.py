@@ -32,11 +32,28 @@ def _read(path: str):
 def cmd_enhance(args) -> None:
     import soundfile as sf
     x, sr = _read(args.input)
-    pipe = StreamingPipeline(PipelineConfig(sample_rate=sr))
+    # DFN3 is a 48 kHz model — resample arbitrary user WAVs in, process at
+    # 48 kHz, resample back out (previously any non-48 kHz file crashed).
+    target_sr = 48_000
+    if sr != target_sr:
+        from scipy.signal import resample_poly
+        from math import gcd
+        g = gcd(sr, target_sr)
+        print(f"resampling {sr} Hz → {target_sr} Hz for DFN3 (output written at {sr} Hz)")
+        x48 = resample_poly(x, target_sr // g, sr // g).astype(np.float32)
+    else:
+        x48 = x
+    pipe = StreamingPipeline(PipelineConfig())
     print("backends:", pipe.backend_summary)
-    y = pipe.process_signal(x)
+    y = pipe.process_signal(x48)
+    if sr != target_sr:
+        from scipy.signal import resample_poly
+        from math import gcd
+        g = gcd(sr, target_sr)
+        y = resample_poly(y, sr // g, target_sr // g).astype(np.float32)
+        y = y[: len(x)]
     out = args.output or str(Path(args.input).with_name(Path(args.input).stem + "_enhanced.wav"))
-    sf.write(out, y, sr)
+    sf.write(out, np.clip(y, -1.0, 1.0), sr)
     print(f"wrote {out}")
 
 
