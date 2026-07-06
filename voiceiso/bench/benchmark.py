@@ -48,15 +48,15 @@ def _peak_rss_mb() -> float:
     return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024  # bytes vs KB
 
 
-def _align_to_ref(ref: np.ndarray, x: np.ndarray, max_lag: int = 64) -> Tuple[np.ndarray, int]:
+def _align_to_ref(ref: np.ndarray, x: np.ndarray, max_lag: int = 1024) -> Tuple[np.ndarray, int]:
     """Time-align ``x`` to ``ref`` before intrusive scoring.
 
-    The pipeline can delay its output by a few samples (e.g. the multi-band
-    FIR's 15-sample group delay engages whenever a band gain != 1).  SI-SDR is
-    exquisitely delay-sensitive — a 15-sample shift alone caps it at ≈ −5 dB —
-    so without alignment the metric measures the delay, not the enhancement.
-    Estimates the lag by cross-correlation restricted to ±``max_lag`` samples
-    and shifts ``x`` (zero-padding the tail) to compensate.
+    The pipeline can delay its output by small known amounts (e.g. the
+    multi-band FIR's 15-sample group delay engages whenever a band gain != 1).
+    SI-SDR is exquisitely delay-sensitive — a 15-sample shift alone caps it at
+    ≈ −5 dB — so without alignment the metric measures the delay, not the
+    enhancement.  Estimates the lag by cross-correlation restricted to
+    ±``max_lag`` samples and shifts ``x`` (zero-padding the tail) to compensate.
 
     Returns (aligned_x, lag) where lag > 0 means ``x`` lagged ``ref``.
     """
