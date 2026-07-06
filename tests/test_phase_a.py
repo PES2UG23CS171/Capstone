@@ -90,6 +90,30 @@ def test_classifier_robust_to_short_window():
     assert clf._warned_infer is False, "pad/crop should prevent inference errors"
 
 
+# ── H2: partial buffer (≥1 s, <4 s) classifies via tile-pad ──────────────────
+def test_classifier_labels_partial_buffer():
+    cfg = PipelineConfig()
+    if not _has_efficientat(cfg):
+        raise _Skip("onnxruntime / head ONNX unavailable")
+    from voiceiso.stages.noise_classifier import EfficientATNoiseClassifier
+    clf = EfficientATNoiseClassifier(cfg)
+    sr = cfg.sample_rate
+    # Only 2 s of audio — under the 4 s window; previously could NEVER classify.
+    t = np.arange(int(sr * 2.0)) / sr
+    tone = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    clf.reset()
+    block = 4800
+    last = None
+    for s in range(0, (len(tone) // block) * block, block):
+        ctx = FrameContext(audio=tone[s:s + block].copy(), sample_rate=sr)
+        ctx.meta = {}
+        ctx = clf.process(ctx)
+        last = ctx.meta.get("noise_label")
+    assert last is not None
+    assert max(v for k, v in clf._smoothed.items() if k != "clean") > 0.0, (
+        "2 s of tone must produce non-zero posteriors (tile-pad inference)")
+
+
 # ── C4: bad model path falls back to heuristic VISIBLY ───────────────────────
 def test_bad_path_fallback_is_visible():
     try:

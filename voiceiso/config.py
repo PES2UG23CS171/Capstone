@@ -149,6 +149,12 @@ class PipelineConfig:
     # backbone costs ~11 ms/run on CPU; 500 ms cadence amortises that to ~2 %
     # of one core while the noise class changes far slower than that anyway.
     noise_classifier_hop_ms: float = 500.0     # rerun cadence
+    # Minimum buffered audio before the FIRST inference.  A partial buffer
+    # (≥ this, < window) is tile-repeated to the 4 s window — mirroring the
+    # training pad policy for short clips — so the classifier can label the
+    # first seconds of a session / short clips instead of being forced to
+    # "clean" until the full window fills.
+    noise_classifier_min_infer_s: float = 1.0
     noise_classifier_smooth_alpha: float = 0.5  # EWMA over per-class posteriors
     # A noise/speech target must exceed this smoothed posterior to win over
     # "clean".  AudioSet posteriors for a correct coarse class on a short clip
