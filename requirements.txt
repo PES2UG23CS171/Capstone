@@ -35,7 +35,11 @@ pystoi>=0.3          # STOI / ESTOI  (optional)
 librosa>=0.10        # feature extraction / resampling helpers
 
 # Desktop app (GUI + tray)
-PyQt6>=6.5
+# PyQt6 pinned: Qt 6.11 fails to initialize the cocoa platform plugin on
+# macOS 26 ("Could not find the Qt platform plugin 'cocoa'", even with an
+# explicit QT_QPA_PLATFORM_PLUGIN_PATH). 6.7.1 is verified working.
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.1
 pystray>=0.19
 pyqtgraph>=0.13
 Pillow>=10.0
