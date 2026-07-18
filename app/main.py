@@ -33,6 +33,27 @@ import sys
 import os
 from pathlib import Path
 
+# ── Qt environment hygiene ───────────────────────────────────────────
+# IDE/Electron terminals sometimes export EMPTY Qt overrides
+# (QT_QPA_PLATFORM_PLUGIN_PATH="" and friends).  Qt treats set-but-empty
+# as a real override and aborts QApplication with:
+#   Could not find the Qt platform plugin "cocoa" in ""
+# Reproduced: ANY one of the three vars below, exported empty, kills an
+# otherwise-working install.  Drop empty values, then pin the platform
+# plugin path to THIS interpreter's PyQt6 so a foreign (IDE-injected)
+# Qt path can never shadow it.  Runs before the re-exec so the child
+# inherits the cleaned environment.
+for _var in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH", "QT_QPA_PLATFORM"):
+    if os.environ.get(_var) == "":
+        del os.environ[_var]
+try:
+    import PyQt6 as _pyqt6                       # package init only — no Qt libs load here
+    _plat_dir = Path(_pyqt6.__file__).resolve().parent / "Qt6" / "plugins" / "platforms"
+    if _plat_dir.is_dir():
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(_plat_dir)
+except Exception:
+    pass
+
 # ── macOS: Virtual environment GUI fix ───────────────────────────────
 # A standard venv python executable on macOS lacks the Bundle ID context
 # required by AppKit/Cocoa, which causes PyQt6 to fatally crash the app.  The
