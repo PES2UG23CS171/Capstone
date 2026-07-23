@@ -54,13 +54,37 @@ the ~200–300 ms design point instead of ratcheting after load spikes.
 
 ### Live-demo checklist
 
+- Launch with `./run.sh` (pins the venv — running the system Python silently
+  drops DFN3 to passthrough; the startup log must say
+  `'enhancement': 'deepfilternet3'`).
 - **Use headphones** (or a headset). AEC is off by default and mic→speaker
   loopback echoes the presenter's voice back — DFN3 *preserves* speech by design.
 - **Use a wired 48 kHz-capable microphone.** Bluetooth HFP mics run at 8/16 kHz
   and can fail to open (the app streams fixed 48 kHz).
 - Connect all audio devices **before** launching the app (the device list is a
-  startup snapshot).
-- Output gain is capped at +6 dB; the strength slider is the demo control.
+  startup snapshot). macOS mic mode: **Standard** (don't stack Apple's own
+  Voice Isolation in front).
+- **Strength slider at 100 %** — the wet/dry mix caps total suppression at
+  −20 dB when the slider sits at 90 %.
+- Give it ~2 s after start before judging (first classifier label lands ~1 s).
+
+### Demo choreography (plays to measured strengths)
+
+1. **Fan / steady noise while talking** — headline: −40 dB fan kill, speech
+   preserved.
+2. **Claps & snaps in speech pauses** — the transient kick crushes every
+   impulse (−48…−53 dB, no decay across repeats). Clap *between* phrases —
+   a clap overlapping your own words shares the speech bands DFN3 must
+   protect and only attenuates 2–4 dB (known architectural limit; say so).
+3. **Keyboard while talking** — strongest classifier class (F1 0.84).
+4. **Phone playing a voice next to you** *(optional segment)* — relaunch with
+   `VOICEISO_HEAD=checkpoints/efficientat_head12_v4.onnx ./run.sh` to enable
+   the TV-rejection head (0.86 loudspeaker rejection vs 0.54 default; the
+   trade-off is documented in ARCHITECTURE.md §10).
+5. To let the audience hear the processed stream: record with
+   `python -m scripts.live_probe` and play `diag_capture/probe_out.wav`, or
+   route the app's output into a call. The room itself always carries the
+   raw sound — suppression exists only in the stream.
 
 ## Benchmarks (reproducible)
 
@@ -101,6 +125,18 @@ v2, but in the live-mic transient regime it is markedly more robust: with a
 the test clips were in its training pool). The remaining gap to the 0.70
 macro-F1 target is the **frozen mn10_as embedding ceiling** plus data-starved
 classes (`fan`: 64 dev clips → F1 0.40); see ARCHITECTURE.md §10.
+
+**Opt-in v4 "TV-rejection" head** (`VOICEISO_HEAD=checkpoints/efficientat_head12_v4.onnx`):
+trained with synthesized loudspeaker/TV speech (the `tv` class had ZERO
+FSD50K positives and could never fire), 6× fan augmentation, a stratified
+validation split, and per-class calibrated thresholds shipped in ONNX
+metadata. On held-out eval speech it rejects loudspeaker-played speech
+**0.86–0.91 vs v3's 0.54** (labels it `tv` 0.41–0.68 vs **0.00**) with no live-speech
+regression — but costs ~0.02 FSD50K macro-F1 (the new tv decision claims
+channel-degraded field-recorded "speech" clips), so it **failed the
+pre-registered no-regression deploy gate** and ships opt-in rather than
+default. Use it for demos featuring a phone/TV playing voice next to the
+speaker.
 
 ## Tests
 

@@ -465,6 +465,29 @@ classifier.
 > remains invalid (≈30 % of the test clips were in its training pool).
 > Reproduce: `python -m scripts.retrain_head_dev --eval-only`.
 
+> **v4 (TV-rejection, opt-in — `scripts/train_head_v4.py`):** the `tv` class
+> had zero FSD50K positives (untrainable, all-negative row). v4 synthesizes
+> loudspeaker/TV positives from dev speech+music (band-limit 180–400 Hz →
+> 3.2–5.2 kHz, tanh compression, small-room reverb; uploader side inherited
+> from the source clip), multiplies `fan` ×6 with gain/tilt jitter, uses a
+> STRATIFIED uploader-grouped val (per-class floors — v3's val had fan=0,
+> keyboard=4, so its early stopping partially selected on noise), and
+> calibrates per-class decision thresholds on val, shipped as ONNX
+> `thresholds` metadata (runtime ranks posterior/threshold; heads without
+> the metadata behave exactly as before).
+> **Results:** stratified val macro-F1 0.792 (10 classes incl. tv). Held-out
+> loudspeaker discrimination (EVAL speech clips, live vs loudspeaker-sim):
+> rejects loudspeaker speech **0.86–0.91 vs v3's 0.54**, labels it tv
+> **0.41–0.68 vs 0.00**, live-speech leg unchanged. **But** FSD50K-eval
+> macro-F1 regresses 0.636 → 0.613–0.617 (speech recall 0.40 → 0.33–0.35:
+> the tv decision claims channel-degraded field-recorded "speech"). One
+> disclosed threshold retest (t_tv 0.95 → 1.5, selected on val) did not
+> close the gap, so the pre-registered ≤0.01 no-regression gate FAILED and
+> v3 remains the default; v4 is opt-in via `VOICEISO_HEAD`. This is an
+> honest capability/benchmark trade: FSD50K labels loudspeaker-channel
+> recordings as "speech", so a head that learns the channel is penalized by
+> exactly the recordings it is designed to flag.
+
 > **Below the 0.70 macro-F1 target — bottleneck (evidenced):** the *frozen
 > representation* plus data starvation, not the head or threshold. A
 > clean-threshold sweep is flat; head capacity barely moves it (linear → MLP-512
