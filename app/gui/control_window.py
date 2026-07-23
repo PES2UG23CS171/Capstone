@@ -314,7 +314,12 @@ class ControlWindow(QMainWindow):
 
     # ── Engine event polling ─────────────────────────────────────────────
 
+    # Seconds an ERROR message stays pinned before STATUS may overwrite it
+    # (the 20 Hz status refresh previously wiped errors within ~50 ms).
+    _ERROR_HOLD_S = 8.0
+
     def _poll_engine(self) -> None:
+        import time as _time
         for evt in self._engine.poll_events():
             if evt.kind == EvtType.STATUS:
                 self._saw_status = True
@@ -322,17 +327,22 @@ class ControlWindow(QMainWindow):
             elif evt.kind == EvtType.DEVICE_LIST:
                 self._handle_device_list(evt.payload)
             elif evt.kind == EvtType.ERROR:
+                self._error_until = _time.monotonic() + self._ERROR_HOLD_S
                 self.statusBar().showMessage(f"⚠  {evt.payload}")
             elif evt.kind == EvtType.ENGINE_STOPPED:
                 self.statusBar().showMessage("Engine stopped.")
-        # Death check: a crashed engine process (native segfault, kill) emits
-        # no ENGINE_STOPPED — without this the status bar keeps saying
-        # "Engine running" over dead silence.
-        if getattr(self, "_saw_status", False) and not self._engine.alive:
+        # Death check.  Two windows are covered: (a) after the engine has been
+        # seen alive (any STATUS), and (b) STARTUP — the engine process died
+        # during model load / warm-up, before its first STATUS (previously the
+        # GUI showed "Engine starting…" forever over a dead process).
+        alive = self._engine.alive
+        if getattr(self, "_engine_seen_alive", False) and not alive:
             self.statusBar().showMessage(
                 "🔴 ENGINE PROCESS DIED — audio has stopped. Restart the app.")
             self.meter_in.set_level(-120.0)
             self.meter_out.set_level(-120.0)
+        if alive:
+            self._engine_seen_alive = True
 
     def _handle_status(self, s: StatusPayload) -> None:
         self.meter_in.set_level(s.input_level_db)
@@ -351,6 +361,9 @@ class ControlWindow(QMainWindow):
         else:
             self.lbl_rtf.setText("RTF: —")
 
+        import time as _time
+        if _time.monotonic() < getattr(self, "_error_until", 0.0):
+            return                     # keep the pinned error visible
         xr = f"  |  x-runs: {s.xruns}" if s.xruns else ""
         self.statusBar().showMessage(f"Engine running{xr}")
 

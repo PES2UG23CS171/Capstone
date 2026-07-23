@@ -403,6 +403,23 @@ class EfficientATNoiseClassifier(_BaseClassifier):
         self._native_target = (
             {l.strip().lower() for l in self._labels} == set(_TARGET_LABELS)
         )
+        # Per-class calibrated decision thresholds (v4+): "thresholds" metadata,
+        # pipe-joined floats aligned with the labels order.  Absent → all 1.0
+        # (decision rule identical to the uncalibrated argmax).
+        self._thresholds: dict[str, float] = {}
+        thr_str = meta.get("thresholds") or ""
+        if thr_str:
+            try:
+                vals = [float(v) for v in thr_str.split("|")]
+                if len(vals) == len(self._labels):
+                    self._thresholds = {
+                        l.strip().lower(): max(v, 1e-3)
+                        for l, v in zip(self._labels, vals)
+                    }
+                    logger.info("noise classifier: per-class thresholds loaded (%d)",
+                                len(self._thresholds))
+            except ValueError:
+                logger.warning("noise classifier: malformed 'thresholds' metadata ignored")
         # Required mel frame count, read from the ONNX input shape.  The shipped
         # native-12 head is exported with a STATIC time axis (e.g. [1,1,128,400]
         # for a 4 s window); feeding any other frame count raises InvalidArgument.
@@ -514,8 +531,13 @@ class EfficientATNoiseClassifier(_BaseClassifier):
         "clean" complement must not auto-win the argmax (AudioSet posteriors
         for a correct coarse class on a short clip are modest, ~0.2–0.4).
         """
-        non_clean = [(t, self._smoothed[t]) for t in _TARGET_LABELS if t != "clean"]
-        top, top_v = max(non_clean, key=lambda kv: kv[1])
+        # Per-class calibrated thresholds (ONNX "thresholds" metadata, v4+):
+        # rank by smoothed/threshold so a class with a high operating point
+        # (e.g. music) can't outbid a well-calibrated rarer class.  Heads
+        # without the metadata get all-ones (identical to the old argmax).
+        non_clean = [(t, self._smoothed[t] / self._thresholds.get(t, 1.0),
+                      self._smoothed[t]) for t in _TARGET_LABELS if t != "clean"]
+        top, _score, top_v = max(non_clean, key=lambda kv: kv[1])
         if top_v < self._clean_threshold:
             top = "clean"
         internal = _TARGET_TO_INTERNAL.get(top, "other")

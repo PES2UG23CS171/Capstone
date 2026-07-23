@@ -87,6 +87,35 @@ def test_warmup_primes_pipeline():
     assert dt_ms < 100.0, f"post-warmup block took {dt_ms:.1f} ms (budget 100)"
 
 
+# ── R9: reset() must give cross-pair independence (benchmark validity) ───────
+def test_reset_gives_sample_exact_independence():
+    """Pair B processed after (pair A + reset) must equal pair B processed on
+    a FRESH pipeline, sample-exactly.  Any stage whose reset() misses state
+    (enhancement history, multiband gains/delay, postfilter gate/CN, controller
+    EWMAs, classifier buffers) breaks per-pair benchmark independence."""
+    pipe = _mk_pipeline()
+    rng = np.random.default_rng(7)
+    pair_a = (0.1 * rng.standard_normal(48_000)).astype(np.float32)
+    pair_b = (0.1 * rng.standard_normal(48_000)).astype(np.float32)
+
+    def run(p, sig):
+        out = np.zeros_like(sig)
+        for s in range(0, len(sig), 4800):
+            out[s:s + 4800] = p.process_block(sig[s:s + 4800]).audio[:4800]
+        return out
+
+    run(pipe, pair_a)                 # contaminate state
+    pipe.reset()
+    out_after_reset = run(pipe, pair_b)
+
+    fresh = _mk_pipeline()
+    fresh.reset()
+    out_fresh = run(fresh, pair_b)
+
+    diff = float(np.max(np.abs(out_after_reset - out_fresh)))
+    assert diff == 0.0, f"reset() leaks state across pairs (max diff {diff:.2e})"
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     npass = nskip = nfail = 0

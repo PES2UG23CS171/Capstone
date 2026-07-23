@@ -93,18 +93,17 @@ class LiveStream:
         # Drop-OLDEST policy: if the worker is behind, discard the *stale* input
         # rather than the *fresh* one, so latency stays bounded.
         self.drops_in += self._put_drop_oldest(self._in_q, mono)
-        # Emit the FRESHEST enhanced block; underflow → silence (overload).
-        # Draining to the newest item means an output backlog left by any
-        # worker stall (which would otherwise persist forever — both queue
-        # ends run at the callback cadence) costs one skip instead of a
-        # permanent +queue-depth of latency.
-        y = None
+        # Backlog policy: cap at 2, take the oldest remaining — keeps ONE
+        # spare block as a jitter cushion (a >100 ms worker spike plays the
+        # spare instead of a silence gap) while bounding any post-stall
+        # latency ratchet at +100 ms.  See app/audio/engine.py for the
+        # red-team simulation behind this choice.
         try:
-            while True:
-                y = self._out_q.get_nowait()
+            while self._out_q.qsize() > 2:
+                self._out_q.get_nowait()
+                self.drops_out += 1
+            y = self._out_q.get_nowait()
         except queue.Empty:
-            pass
-        if y is None:
             y = np.zeros(frames, dtype=np.float32)
         if len(y) < frames:
             y = np.concatenate([y, np.zeros(frames - len(y), dtype=np.float32)])
@@ -115,10 +114,15 @@ class LiveStream:
     def run(self, duration_s: float = 0.0) -> None:  # pragma: no cover
         self.pipe.reset()
         print("voiceiso live: warming up models (~2 s)…", flush=True)
-        self.pipe.warmup()
+        try:
+            self.pipe.warmup()
+        except Exception as exc:  # noqa: BLE001 — degrade like the app engine does
+            print(f"voiceiso live: warm-up failed ({type(exc).__name__}: {exc}) — "
+                  "continuing; first blocks may stutter", flush=True)
         self._run = True
         self.drops_in = 0
         self.drops_out = 0
+        self.worker_errors = 0
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
         print("voiceiso live:", self.pipe.backend_summary)
