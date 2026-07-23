@@ -61,7 +61,12 @@ class PipelineConfig:
     supp_release_ms: float = 150.0     # how fast it ramps down (avoid pumping)
 
     # ── Post-filter / comfort noise ──────────────────────────────────────
-    comfort_noise_db: float = -65.0    # injected to mask dead-silence artifacts
+    # Ceiling for injected comfort noise.  -65 dBFS was audible as a constant
+    # "static air hiss" on headphones once real room noise was actually
+    # suppressed (measured: fan-room output floor sat exactly at the CN
+    # ceiling).  -78 dBFS keeps the dead-air masking function while sitting
+    # below audibility at normal playback gain.
+    comfort_noise_db: float = -78.0
     postfilter_floor_db: float = -18.0 # max additional residual attenuation
 
     # ── AEC ──────────────────────────────────────────────────────────────
