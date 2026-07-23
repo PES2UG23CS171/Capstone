@@ -98,7 +98,9 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     # ── Mutable state (modified by GUI commands) ─────────────────────────
     enabled: bool = cfg.suppression_enabled
     strength: float = cfg.suppression_strength
-    gain_db: float = cfg.output_gain_db
+    # Clamp the initial gain the same way SET_GAIN commands are clamped —
+    # a persisted/hand-edited config must not bypass the +6 dB feedback margin.
+    gain_db: float = float(np.clip(cfg.output_gain_db, -60.0, 6.0))
     gain_lin: float = 10.0 ** (gain_db / 20.0)
     passthrough: bool = False       # direct mic→headphones with zero processing
 
@@ -218,11 +220,14 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                 # rate-limit the traceback (it previously spammed every 100 ms).
                 worker_errors += 1
                 if worker_errors == 1:
-                    evt_q.put(Event(
-                        EvtType.ERROR,
-                        "Pipeline error — passing mic audio through unprocessed "
-                        "for affected blocks (see engine log).",
-                    ))
+                    try:
+                        evt_q.put_nowait(Event(
+                            EvtType.ERROR,
+                            "Pipeline error — passing mic audio through unprocessed "
+                            "for affected blocks (see engine log).",
+                        ))
+                    except queue.Full:
+                        pass          # never park the DSP worker on the GUI queue
                 now = time.monotonic()
                 if now - worker_err_last_log >= 5.0:
                     worker_err_last_log = now
@@ -247,8 +252,10 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         nonlocal peak_in, peak_out, xruns, current_rtf
 
         if status:
+            # Count only — logging (blocking I/O) inside the RT callback
+            # worsens the very xrun storm that triggered it; the status loop
+            # reports the counter.
             xruns += 1
-            log.warning("stream status: %s", status)
 
         # Measure input level
         peak_in = float(np.max(np.abs(indata)))
@@ -270,23 +277,20 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             # block can't xrun the audio device — it only adds bounded latency.
             mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
             _drop_oldest_put(_proc_in, mono)
-            # Drain to the FRESHEST finished block.  In steady state the
-            # worker produces exactly one block per callback, so this takes
-            # one item.  After any stall the backlog would otherwise park at
-            # full depth forever (production and consumption are both locked
-            # to the callback cadence — there is no other drain path), adding
-            # a permanent +400 ms of latency; skipping to the freshest block
-            # snaps latency back to design in one callback.
-            latest = None
+            # Backlog policy: CAP the output backlog at 2 blocks, then take the
+            # oldest remaining.  This keeps ONE spare block as a jitter cushion
+            # (a single >100 ms worker spike plays the spare instead of
+            # silence) while bounding any post-stall latency ratchet at
+            # +100 ms.  Red-team simulation showed pure drain-to-freshest has
+            # zero cushion (silence gap on every spike — ~1.1 s/min under the
+            # measured thermal profile) and the old unbounded backlog parked
+            # +400 ms forever; cap-at-2/take-one beats both for a live demo.
             try:
-                while True:
-                    latest = _proc_out.get_nowait()
-            except queue.Empty:
-                pass
-            if latest is not None:
-                y, rtf = latest
+                while _proc_out.qsize() > 2:
+                    _proc_out.get_nowait()           # drop stalest beyond the cap
+                y, rtf = _proc_out.get_nowait()
                 current_rtf = rtf
-            else:
+            except queue.Empty:
                 y = np.zeros(frames, dtype=np.float32)   # warmup / brief underrun
             if len(y) < frames:
                 y = np.concatenate([y, np.zeros(frames - len(y), dtype=np.float32)])
@@ -361,6 +365,12 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                     running = False
 
                 elif cmd.kind == CmdType.SET_ENABLED:
+                    # Flush BEFORE the flag flips (so no pre-toggle block is
+                    # mistaken for fresh) and again AFTER (so a block the
+                    # worker finished mid-toggle can't replay stale audio —
+                    # the R5 race).  Worst residue after both: ≤1 block,
+                    # bounded further by the backlog cap.
+                    _flush(_proc_in); _flush(_proc_out)
                     enabled = bool(cmd.value)
                     _flush(_proc_in); _flush(_proc_out)
                     log.debug("Suppression enabled = %s", enabled)
@@ -397,6 +407,7 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                     stream = _open_stream()
 
                 elif cmd.kind == CmdType.SET_PASSTHROUGH:
+                    _flush(_proc_in); _flush(_proc_out)
                     passthrough = bool(cmd.value)
                     _flush(_proc_in); _flush(_proc_out)
                     log.info("Passthrough mode = %s", passthrough)

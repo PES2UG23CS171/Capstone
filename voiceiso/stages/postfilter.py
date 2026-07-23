@@ -74,8 +74,16 @@ class PostFilter(Stage):
         self._gate_prev = 1.0
 
     def reset(self) -> None:
-        self._cn_zi[:] = 0.0
         self._gate_prev = 1.0
+        # Restore the startup CN colour AND re-seed the noise generator —
+        # without the re-seed, a reset stream continues the old RNG sequence
+        # and two identical inputs produce different comfort noise (breaks
+        # sample-exact benchmark pair independence; caught by
+        # test_reset_gives_sample_exact_independence).
+        self._cn_filter_class = "clean"
+        self._cn_b, self._cn_a = _CLASS_CN_FILTER["clean"]
+        self._cn_zi = np.zeros(max(len(self._cn_a), len(self._cn_b)) - 1, dtype=np.float64)
+        self._rng = np.random.default_rng(1234)
 
     def _select_cn_filter(self, noise_class: str) -> None:
         """Swap comfort-noise colour when the class changes."""
