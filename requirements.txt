@@ -38,11 +38,11 @@ librosa>=0.10        # feature extraction / resampling helpers
 # PyQt6 pinned: Qt 6.11 fails to initialize the cocoa platform plugin on
 # macOS 26 ("Could not find the Qt platform plugin 'cocoa'", even with an
 # explicit QT_QPA_PLATFORM_PLUGIN_PATH). 6.7.1 is verified working.
-# NOTE (dev machine): on the primary dev Mac even the venv's pip-installed
-# 6.7.1 wheel refuses to load its cocoa plugin, while the SAME version in the
-# framework Python's site-packages works. The venv there deliberately has NO
-# PyQt6 — app/main.py's re-exec falls through to the framework copy. Do not
-# reinstall PyQt6 into that venv; on fresh machines this pin applies normally.
+# NOTE: an earlier "venv PyQt6 won't load cocoa while the framework copy
+# does" incident on the dev Mac was root-caused to iCloud Drive managing the
+# repo directory (venv files were being rewritten/interfered with in place).
+# With the project removed from iCloud management, the venv's own 6.7.1
+# installs and runs normally. Keep the repo out of iCloud-synced paths.
 PyQt6==6.7.1
 PyQt6-Qt6==6.7.1
 pystray>=0.19
