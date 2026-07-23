@@ -36,22 +36,39 @@ def main() -> int:
     args = ap.parse_args()
 
     out = Path(args.out)
-    if out.exists():
+    # A partial/failed prior run can leave a zero-byte corpse — treat anything
+    # under 100 KB as absent (the real model is ~1.1 MB).
+    if out.exists() and out.stat().st_size > 100_000:
         print(f"already present: {out} ({out.stat().st_size} bytes)")
         return 0
     out.parent.mkdir(parents=True, exist_ok=True)
     print(f"downloading {args.url}\n        → {out}")
+    data = b""
     try:
-        with urlopen(args.url, timeout=30) as r:  # noqa: S310 - pinned GH raw URL
+        with urlopen(args.url, timeout=60) as r:  # noqa: S310 - pinned GH raw URL
             data = r.read()
     except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: download failed ({exc}).", file=sys.stderr)
-        print("  The repo does not redistribute the model. Obtain sig_bak_ovr.onnx "
-              "from the Microsoft DNS-Challenge repo (DNSMOS/DNSMOS/) and place it "
-              f"at {out}.", file=sys.stderr)
+        print(f"urllib failed ({exc}); trying curl…", file=sys.stderr)
+    if len(data) < 100_000:
+        # Some environments return empty bodies through urllib for GitHub
+        # redirects — fall back to curl -L (observed on the dev Mac).
+        import subprocess
+        gh = args.url.replace("raw.githubusercontent.com/", "github.com/").replace(
+            "/master/", "/raw/master/") if "raw.githubusercontent" in args.url else args.url
+        rc = subprocess.run(["curl", "-sL", "--fail", "--max-time", "240",
+                             "-o", str(out), gh]).returncode
+        if rc == 0 and out.exists():
+            data = out.read_bytes()
+    # Validate: size + protobuf-ish start (0x08 field-1 varint = ONNX ir_version).
+    if len(data) < 100_000 or data[:1] != b"\x08":
+        if out.exists():
+            out.unlink()
+        print(f"ERROR: download invalid ({len(data)} bytes).", file=sys.stderr)
+        print("  Obtain sig_bak_ovr.onnx from the Microsoft DNS-Challenge repo "
+              f"(DNSMOS/DNSMOS/) and place it at {out}.", file=sys.stderr)
         return 1
     out.write_bytes(data)
-    print(f"wrote {len(data)} bytes. PipelineConfig will auto-wire it.")
+    print(f"wrote {len(data)} bytes (validated). PipelineConfig will auto-wire it.")
     return 0
 
 
