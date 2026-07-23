@@ -66,7 +66,9 @@ class PipelineConfig:
     # suppressed (measured: fan-room output floor sat exactly at the CN
     # ceiling).  -78 dBFS keeps the dead-air masking function while sitting
     # below audibility at normal playback gain.
-    comfort_noise_db: float = -78.0
+    # (-78 was still faintly audible as "static" on sealed headphones in a
+    # silent room; -85 is below audibility while keeping the dead-air mask.)
+    comfort_noise_db: float = -85.0
     postfilter_floor_db: float = -18.0 # max additional residual attenuation
 
     # ── AEC ──────────────────────────────────────────────────────────────

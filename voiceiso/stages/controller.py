@@ -218,8 +218,29 @@ class DynamicController(Stage):
         rms_db = 20.0 * np.log10(float(np.sqrt(np.mean(ctx.audio ** 2))) + 1e-12)
         transient_kick = (
             (rms_db - self._rms_slow_db) >= 15.0
-            and ctx.vad_prob < 0.5
+            and not ctx.is_speech          # VAD verdict incl. hangover: never
+                                           # kick during (or right after) the
+                                           # user's own speech — a mid-speech
+                                           # kick maxes DFN3 on a block that
+                                           # CONTAINS speech and audibly
+                                           # mangles it (claps don't trip
+                                           # Silero: measured vad≤0.03)
             and rms_db > -50.0
+            and self._rms_slow_db < -45.0  # QUIET-room arm only: in steady
+                                           # noise (rain/fan/white) suppression
+                                           # is already high and phrase onsets
+                                           # over the noise would false-fire
+                                           # the jump detector before VAD
+                                           # catches up (measured: audible
+                                           # onset distortion over rain)
+            and ctx.snr_db > 20.0          # …and the cold-start hole: the slow
+                                           # average starts at −70 after every
+                                           # warm-up, so a loud room reads
+                                           # "quiet" for ~2 s.  An impulse over
+                                           # true silence reads high SNR
+                                           # (signal over silent floor); steady
+                                           # noise reads low SNR — this gate is
+                                           # valid from block 0.
         )
         if not transient_kick:
             # Track the room level only from non-impulse blocks (τ ≈ 3 s) so a
