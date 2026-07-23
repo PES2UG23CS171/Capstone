@@ -141,10 +141,20 @@ class StreamingPipeline:
         ratcheting mouth-to-ear latency.  Run BEFORE ``stream.start()``.
 
         Feeds ``seconds`` of silence through the full chain (warms VAD +
-        classifier ONNX, fills the classifier window so its first inference
-        happens here, not live) and then warms the DFN3 path directly (the
-        silence blocks bypass it by design).  Deliberately does NOT reset
-        afterwards — the warmed buffers/state are the point.
+        classifier ONNX and triggers the classifier's first inference here,
+        not live) and then warms the DFN3 path directly (the silence blocks
+        bypass it by design).
+
+        Afterwards the DSP state that the silence POISONS is cleared while
+        the warmed sessions/models are kept: with 4.6 s of digital zeros in
+        the preprocessing noise-floor window, the first seconds of real audio
+        measure an absurd ~60 dB SNR (noise floor = silence), the controller
+        holds suppression near zero, and the session audibly opens
+        under-suppressed for ~5 s (fan rooms sound untouched).  Clearing the
+        preprocessing / classifier / controller state costs nothing — those
+        resets touch numpy state only, never the loaded models — and the
+        classifier re-labels real audio from ~1 s via the partial-buffer
+        tile-pad path instead of arguing with 3 s of buffered silence.
         """
         block = int(round(self.cfg.sample_rate * 0.1))
         zeros = np.zeros(block, dtype=np.float32)
@@ -153,6 +163,12 @@ class StreamingPipeline:
         warm = getattr(self.enhancement, "warmup", None)
         if callable(warm):
             warm()
+        # Clear silence-poisoned DSP state; models stay warm (these resets
+        # are numpy-only — Enhancement.reset() is NOT called so its torch
+        # first-call warm-up is preserved, and its history rebuilds in 80 ms).
+        self.preprocessing.reset()
+        self.classifier.reset()
+        self.controller.reset()
 
     def process_block(
         self, block: np.ndarray, reference: Optional[np.ndarray] = None
