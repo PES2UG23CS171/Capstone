@@ -215,32 +215,33 @@ class DynamicController(Stage):
         # one.  A kick forces DFN3 on at high strength for the block; a false
         # positive on a word onset is fail-safe (the block just gets normal
         # denoising — DFN3 preserves speech).
+        # Impulse detection by INTRA-BLOCK CREST: split the 100 ms block into
+        # 10 ms sub-frames and compare the loudest sub-frame to the median.
+        # A clap/snap/slam concentrates its energy in 1–3 sub-frames → crest
+        # 18–30 dB at ANY room floor or mic gain (the floor sets the median,
+        # the impulse sets the max — the ratio is level-independent by
+        # construction).  A speech onset over steady rain/white noise raises
+        # several sub-frames together → crest ≲ 12 dB.  This replaced two
+        # earlier absolute/ratio gate designs that flipped behaviour with the
+        # room's dBFS floor (block-RMS dilutes a 30 ms impulse ~10 dB, so any
+        # whole-block level gate is narrow-margin).
         rms_db = 20.0 * np.log10(float(np.sqrt(np.mean(ctx.audio ** 2))) + 1e-12)
+        n_sub = max(1, len(ctx.audio) // (cfg.sample_rate // 100))   # 10 ms
+        sub = ctx.audio[: n_sub * (cfg.sample_rate // 100)].reshape(n_sub, -1)
+        sub_db = 10.0 * np.log10(np.mean(sub.astype(np.float64) ** 2, axis=1) + 1e-12)
+        # max-vs-MIN, not median: a reverby clap's tail occupies most of the
+        # block and drags the median up, but the pre-impulse floor still shows
+        # in at least one 10 ms sub-frame.  An impulse block has BOTH a spike
+        # and a quiet slice; steady speech/noise mixtures have neither.
+        crest_db = float(np.max(sub_db) - np.min(sub_db))
         transient_kick = (
-            (rms_db - self._rms_slow_db) >= 15.0
-            and not ctx.is_speech          # VAD verdict incl. hangover: never
-                                           # kick during (or right after) the
-                                           # user's own speech — a mid-speech
-                                           # kick maxes DFN3 on a block that
-                                           # CONTAINS speech and audibly
-                                           # mangles it (claps don't trip
-                                           # Silero: measured vad≤0.03)
-            and rms_db > -50.0
-            and self._rms_slow_db < -45.0  # QUIET-room arm only: in steady
-                                           # noise (rain/fan/white) suppression
-                                           # is already high and phrase onsets
-                                           # over the noise would false-fire
-                                           # the jump detector before VAD
-                                           # catches up (measured: audible
-                                           # onset distortion over rain)
-            and ctx.snr_db > 20.0          # …and the cold-start hole: the slow
-                                           # average starts at −70 after every
-                                           # warm-up, so a loud room reads
-                                           # "quiet" for ~2 s.  An impulse over
-                                           # true silence reads high SNR
-                                           # (signal over silent floor); steady
-                                           # noise reads low SNR — this gate is
-                                           # valid from block 0.
+            crest_db >= 18.0
+            and ctx.vad_prob < 0.75    # only CONFIDENT speech vetoes the kick
+                                       # (claps tickle Silero ≤~0.5; a false
+                                       # kick on an unvoiced onset in a quiet
+                                       # room is fail-safe — DFN3 on clean
+                                       # speech is transparent)
+            and rms_db > -55.0         # lenient sanity floor only
         )
         if not transient_kick:
             # Track the room level only from non-impulse blocks (τ ≈ 3 s) so a
