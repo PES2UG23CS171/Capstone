@@ -31,3 +31,5 @@ checkpoints/efficientat_s_4s.onnx.data
 checkpoints/_embed_extractor.onnx
 checkpoints/_embed_extractor.onnx.data
 checkpoints/dev_emb_cache_v3.npz
+checkpoints/dev_emb_cache_v4.npz
+checkpoints/sig_bak_ovr.onnx  # downloaded by scripts/fetch_dnsmos.py — not redistributed
