@@ -211,16 +211,32 @@ class PipelineConfig:
         # heuristic classifier — see StreamingPipeline.
         if self.noise_classifier_model_path is None:
             from pathlib import Path
+            import os as _os
             repo_root = Path(__file__).resolve().parent.parent
             ck = Path(self.checkpoint_dir)
             if not ck.is_absolute():
                 ck = repo_root / ck
+            # Explicit head override (e.g. VOICEISO_HEAD=checkpoints/
+            # efficientat_head12_v4.onnx enables the opt-in TV-rejection head,
+            # which trades −0.02 FSD50K macro-F1 for 0.54→0.86 loudspeaker-
+            # speech rejection — see ARCHITECTURE.md §10).
+            env_head = _os.environ.get("VOICEISO_HEAD")
+            if env_head:
+                cand = Path(env_head)
+                if not cand.is_absolute():
+                    cand = repo_root / cand
+                if cand.exists():
+                    self.noise_classifier_model_path = str(cand)
             # Preference order: v3 (correct protocol + rolling-window-robust
             # training) > v2 (correct protocol, first-4s crops) > v1 (legacy
-            # eval-pool training).
-            for fname in ("efficientat_head12_v3.onnx",
-                          "efficientat_head12_v2.onnx",
-                          "efficientat_head12.onnx"):
+            # eval-pool training).  v4 (TV-rejection) is opt-in only, via
+            # VOICEISO_HEAD — it failed the pre-registered no-regression
+            # deploy gate on FSD50K eval (−0.02 macro-F1) despite its
+            # decisive loudspeaker-rejection gain.
+            for fname in (() if self.noise_classifier_model_path else
+                          ("efficientat_head12_v3.onnx",
+                           "efficientat_head12_v2.onnx",
+                           "efficientat_head12.onnx")):
                 candidate = ck / fname
                 if candidate.exists():
                     self.noise_classifier_model_path = str(candidate)
