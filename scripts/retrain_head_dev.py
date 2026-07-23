@@ -326,7 +326,8 @@ def evaluate_all(head_path, args):
         "pretrained-direct (527→12)": lambda: mk_eat("checkpoints/efficientat_s_4s.onnx"),
         "head v1 (eval-pool)": lambda: mk_eat("checkpoints/efficientat_head12.onnx"),
         "head v2 (dev, first-4s)": lambda: mk_eat("checkpoints/efficientat_head12_v2.onnx"),
-        "head v3 (dev, window-robust)": lambda: mk_eat(v2_path),
+        "head v3 (dev, window-robust)": lambda: mk_eat("checkpoints/efficientat_head12_v3.onnx"),
+        "head UNDER TEST": lambda: mk_eat(v2_path),
     }
     sel = [s.strip() for s in (args.backends or "").split(",") if s.strip()]
     backends = {}
@@ -351,7 +352,7 @@ def evaluate_all(head_path, args):
     for name, r in reports.items():
         print(f"  {name:<28}{r.macro_f1:>10.3f}{r.micro_acc:>8.3f}")
 
-    rep = reports.get("head v3 (dev, window-robust)")
+    rep = reports.get("head UNDER TEST") or reports.get("head v3 (dev, window-robust)")
     if rep is None:
         return reports
     print("\n  head v3 — per-class (precision / recall / F1 / support):")

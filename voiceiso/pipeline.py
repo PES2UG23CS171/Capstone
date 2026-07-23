@@ -122,6 +122,10 @@ class StreamingPipeline:
             "target_speaker_mask": self.target_speaker_mask.backend,
             "tiny_postfilter": self.tiny_postfilter.backend,
             "noise_classifier": self.classifier_backend,
+            "noise_classifier_head": (
+                __import__("os").path.basename(self.cfg.noise_classifier_model_path)
+                if self.cfg.noise_classifier_model_path else None
+            ),
             "noise_classifier_fallback": self.classifier_fallback_reason,
             "aec_enabled": self.aec.enabled,
             "algorithmic_latency_ms": round(self.cfg.algorithmic_latency_ms, 1),
