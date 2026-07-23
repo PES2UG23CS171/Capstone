@@ -101,6 +101,20 @@ python -m scripts.retrain_head_dev --eval-only   # just the eval table
 > white-noise** condition and says so loudly — those numbers are not comparable to
 > real-corpora results.
 
+### Headline results (final sprint)
+
+Synthetic +5 dB condition, n=20, 100 ms live operating point, output
+time-aligned before scoring: **SI-SDRi +5.0 dB**, PESQ 1.24 → 1.36, STOI 0.79,
+DNSMOS SIG 2.94 / BAK 3.00 / OVRL 2.24, RTF 0.38 (0.47 with the DNSMOS/PESQ
+harness in-process), per-block p99 66 ms vs the 100 ms budget, peak RSS
+~560 MB (harness-inclusive).
+
+Real-condition behaviour on held-out FSD50K eval clips
+([REALWORLD_RESULTS.md](REALWORLD_RESULTS.md)): silence-regime attenuation
+**fan +38 dB, clap +45 dB, traffic +38 dB, keyboard +27 dB, TV +19 dB,
+competing speech +23 dB**; during speech at 0 dB SNR, SI-SDRi from **+4.1
+(TV) to +10.2 (keyboard)**.
+
 ### Classifier (`efficientat_head12_v3.onnx`, corrected protocol + window-robust)
 
 Trained on **FSD50K.dev_audio** (uploader-grouped train/val, same split as v2),
