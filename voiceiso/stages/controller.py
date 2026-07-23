@@ -94,6 +94,14 @@ class DynamicController(Stage):
         # 100 ms live block.)
         self._clean_hold_ms = clean_hold_ms
         self._clean_ms = 0.0          # ms of sustained confidently-clean audio
+        # Slow room-level average (dB) for transient detection.  In a quiet
+        # room the SNR estimator reads sparse impulses (claps, snaps, door
+        # slams) as "signal over a silent floor" → high SNR → suppression
+        # relaxes → each successive impulse is LESS suppressed (measured:
+        # clap #1 −52 dB, #3 only −23 dB).  A block whose level jumps far
+        # above this average with no voice activity gets a suppression KICK
+        # so DFN3 engages at full strength on every impulse.
+        self._rms_slow_db = -70.0
         # Smoothed outputs (H3): band gains and post-filter strength get the
         # same attack/release treatment as _supp — previously they stepped
         # straight to the class table's values on a classifier flip (e.g.
@@ -106,6 +114,7 @@ class DynamicController(Stage):
         self._clean_ms = 0.0
         self._band = np.ones(3, dtype=np.float64)
         self._pf = 0.0
+        self._rms_slow_db = -70.0
 
     @staticmethod
     def _smooth_snr_base(snr_db: float) -> float:
@@ -199,20 +208,45 @@ class DynamicController(Stage):
         # identical regardless of the caller's block size.
         dt_ms = 1000.0 * len(ctx.audio) / max(cfg.sample_rate, 1)
 
+        # ── Transient kick ───────────────────────────────────────────────
+        # Impulse (clap/snap/slam) detection: block level far above the slow
+        # room average with no voice activity.  Without this, sparse impulses
+        # in a quiet room read as high SNR and suppression RELAXES with each
+        # one.  A kick forces DFN3 on at high strength for the block; a false
+        # positive on a word onset is fail-safe (the block just gets normal
+        # denoising — DFN3 preserves speech).
+        rms_db = 20.0 * np.log10(float(np.sqrt(np.mean(ctx.audio ** 2))) + 1e-12)
+        transient_kick = (
+            (rms_db - self._rms_slow_db) >= 15.0
+            and ctx.vad_prob < 0.5
+            and rms_db > -50.0
+        )
+        if not transient_kick:
+            # Track the room level only from non-impulse blocks (τ ≈ 3 s) so a
+            # burst of claps can't drag the average up and mask itself.
+            a_rms = 1.0 - np.exp(-dt_ms / 3000.0)
+            self._rms_slow_db += a_rms * (rms_db - self._rms_slow_db)
+        ctx.meta["transient_kick"] = float(transient_kick)
+
         # ── Leaky clean-hold timer (in ms) ───────────────────────────────
         confidently_clean = (
             (not ctx.is_speech)
             and ctx.snr_db >= self._clean_snr
             and ctx.noise_class == "clean"
+            and not transient_kick
         )
         if confidently_clean:
             self._clean_ms += dt_ms
+        elif transient_kick:
+            self._clean_ms = 0.0        # an impulse means the room is NOT clean
         else:
             # Decay 2× faster than it builds — a single flicker doesn't kill the
             # hold, but a real onset clears it quickly.
             self._clean_ms = max(0.0, self._clean_ms - 2.0 * dt_ms)
 
         target = self._compute_target(ctx)
+        if transient_kick:
+            target = max(target, 0.85)
 
         # ── Attack / per-class release smoothing (time-constant in ms) ───
         release_ms = _CLASS_RELEASE_MS.get(ctx.noise_class, cfg.supp_release_ms)
