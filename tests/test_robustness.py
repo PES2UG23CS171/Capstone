@@ -87,6 +87,29 @@ def test_warmup_primes_pipeline():
     assert dt_ms < 100.0, f"post-warmup block took {dt_ms:.1f} ms (budget 100)"
 
 
+# ── HOSTILE-1: non-finite input must not poison persistent state ─────────────
+def test_nan_input_does_not_kill_pipeline():
+    """One NaN/Inf input sample used to poison every stage's recursive state:
+    output went to permanent digital zeros with NO exception, so the live
+    containment (dry-on-exception) could never fire.  The input-side guard
+    must sanitise and the pipeline must keep producing live audio after."""
+    pipe = _mk_pipeline()
+    rng = np.random.default_rng(3)
+    speech = (0.1 * rng.standard_normal(48_000 * 4)).astype(np.float32)
+    levels = []
+    for i in range(40):
+        blk = speech[i * 4800:(i + 1) * 4800].copy()
+        if i == 10:
+            blk[2400] = np.nan
+        if i == 20:
+            blk[:] = np.inf
+        out = pipe.process_block(blk).audio
+        assert np.all(np.isfinite(out))
+        levels.append(20 * np.log10(float(np.sqrt(np.mean(out ** 2))) + 1e-12))
+    assert max(levels[25:]) > -60.0, (
+        f"pipeline dead after non-finite input (tail max {max(levels[25:]):.1f} dBFS)")
+
+
 # ── R9: reset() must give cross-pair independence (benchmark validity) ───────
 def test_reset_gives_sample_exact_independence():
     """Pair B processed after (pair A + reset) must equal pair B processed on

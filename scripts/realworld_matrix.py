@@ -88,6 +88,14 @@ def rms_db(x: np.ndarray) -> float:
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Real-world condition matrix: {noise} × {silence,speech} × SNR "
+                    "through the full deployed pipeline (multi-minute run).")
+    ap.add_argument("--out", default="REALWORLD_RESULTS.md",
+                    help="output markdown path (default: REALWORLD_RESULTS.md in cwd)")
+    args = ap.parse_args()
+
     by = eval_rows()
     speech_files = sorted(Path("dataset/test/clean").glob("*.wav"))
     speech = load48(speech_files[0], 8.0)
@@ -159,8 +167,8 @@ def main() -> int:
         print(row, flush=True)
 
     text = "\n".join(lines) + "\n"
-    Path("REALWORLD_RESULTS.md").write_text(text)
-    print("\nwrote REALWORLD_RESULTS.md")
+    Path(args.out).write_text(text)
+    print(f"\nwrote {args.out}")
     return 0
 
 
