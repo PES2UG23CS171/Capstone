@@ -229,6 +229,16 @@ class PipelineConfig:
                     cand = repo_root / cand
                 if cand.exists():
                     self.noise_classifier_model_path = str(cand)
+                else:
+                    # An EXPLICIT override that doesn't resolve must not be
+                    # silently ignored — the user believes they enabled a
+                    # specific head (e.g. the v4 TV-rejection mode).
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "VOICEISO_HEAD=%r does not exist — override IGNORED, "
+                        "falling back to the default head preference chain",
+                        env_head,
+                    )
             # Preference order: v3 (correct protocol + rolling-window-robust
             # training) > v2 (correct protocol, first-4s crops) > v1 (legacy
             # eval-pool training).  v4 (TV-rejection) is opt-in only, via

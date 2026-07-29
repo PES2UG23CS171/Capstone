@@ -218,9 +218,22 @@ class Enhancement(Stage):
         self._nb_erb = 32
         if _HAS_DF:
             torch.set_num_threads(threads)
-            self._model, state0, _ = init_df(
-                model_base_dir=cfg.dfn_model_dir, config_allow_defaults=True
-            )
+            try:
+                self._model, state0, _ = init_df(
+                    model_base_dir=cfg.dfn_model_dir, config_allow_defaults=True
+                )
+            except Exception as exc:  # noqa: BLE001 — bad model dir / failed
+                # download must not kill the whole pipeline with a raw
+                # traceback; degrade to passthrough with the same LOUD
+                # treatment the classifier fallback gets (the app engine
+                # already raises a GUI ERROR when enhancement != dfn3).
+                logger.warning(
+                    "enhancement: DeepFilterNet3 FAILED TO INITIALISE "
+                    "(%s: %s; dfn_model_dir=%r) — running as PASSTHROUGH "
+                    "(no denoising). Fix the model dir or network and restart.",
+                    type(exc).__name__, exc, cfg.dfn_model_dir,
+                )
+                return
             self.backend = "deepfilternet3"
             if state0.sr() != self.sr:
                 raise RuntimeError(

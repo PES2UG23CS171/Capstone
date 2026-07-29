@@ -97,6 +97,7 @@ class StreamingPipeline:
         self.postfilter = PostFilter(self.cfg)
 
         self._nan_warned = False
+        self._nan_streak = 0
         self.stages: List[Stage] = [
             self.preprocessing,
             self.aec,
@@ -177,8 +178,21 @@ class StreamingPipeline:
     def process_block(
         self, block: np.ndarray, reference: Optional[np.ndarray] = None
     ) -> FrameContext:
+        audio = np.ascontiguousarray(block, dtype=np.float32)
+        # INPUT-side finiteness guard.  A single NaN/Inf sample entering the
+        # chain poisons every stage's recursive state (IIR zi, EWMAs, delay
+        # lines, GRU context, classifier ring buffer) — measured: one bad
+        # sample → permanent digital-zero output with NO exception, which the
+        # live containment (dry-passthrough on exception) can never catch.
+        # Sanitising the input makes poisoning impossible from outside.
+        if not np.all(np.isfinite(audio)):
+            if not self._nan_warned:
+                self._nan_warned = True
+                logger.warning("non-finite INPUT samples sanitised (bad capture "
+                               "device / WAV?); logged once")
+            audio = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
         ctx = FrameContext(
-            audio=np.ascontiguousarray(block, dtype=np.float32),
+            audio=audio,
             sample_rate=self.cfg.sample_rate,
             reference=None if reference is None else np.asarray(reference, dtype=np.float32),
         )
@@ -188,14 +202,29 @@ class StreamingPipeline:
         # noise_class to pick its HP cutoff (default 25 Hz, or 80 Hz under
         # wind).  Pipeline writes back here so the next block sees the hint.
         self.preprocessing.set_prev_noise_class(ctx.noise_class)
-        # NaN/Inf guard: np.clip passes NaN through, so a single numerical
-        # edge case anywhere in the chain would otherwise reach the speakers.
+        # OUTPUT-side guard: np.clip passes NaN through, so a numerical edge
+        # case born INSIDE a stage would otherwise reach the speakers.
         if not np.all(np.isfinite(ctx.audio)):
             if not self._nan_warned:
                 self._nan_warned = True
                 logger.warning("pipeline emitted non-finite samples — sanitised "
                                "(this indicates a stage bug; logged once)")
             ctx.audio = np.nan_to_num(ctx.audio, nan=0.0, posinf=1.0, neginf=-1.0)
+            # Self-healing: internally-born NaN can still poison persistent
+            # state (no exception → containment can't fire, and the live path
+            # never calls reset()).  Ten consecutive poisoned blocks (1 s) →
+            # reset the DSP state once.  reset() costs ~0.01 ms (no model
+            # reload), so the cure is a one-second hiccup instead of
+            # permanent silence until app restart.
+            self._nan_streak += 1
+            if self._nan_streak >= 10:
+                logger.error("pipeline output non-finite for %d consecutive "
+                             "blocks — resetting DSP state to self-heal",
+                             self._nan_streak)
+                self.reset()
+                self._nan_streak = 0
+        else:
+            self._nan_streak = 0
         return ctx
 
     def process_signal(self, x: np.ndarray, block: Optional[int] = None) -> np.ndarray:

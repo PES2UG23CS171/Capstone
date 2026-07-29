@@ -31,7 +31,13 @@ def _read(path: str):
 
 def cmd_enhance(args) -> None:
     import soundfile as sf
-    x, sr = _read(args.input)
+    try:
+        x, sr = _read(args.input)
+    except Exception as exc:  # noqa: BLE001 — unreadable/corrupt/non-audio input
+        sys.exit(f"error: cannot read {args.input!r} as audio "
+                 f"({type(exc).__name__}: {exc})")
+    if len(x) == 0:
+        sys.exit(f"error: {args.input!r} contains no audio samples")
     # DFN3 is a 48 kHz model — resample arbitrary user WAVs in, process at
     # 48 kHz, resample back out (previously any non-48 kHz file crashed).
     target_sr = 48_000
