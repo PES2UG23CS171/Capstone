@@ -52,6 +52,34 @@ so it is xrun-safe. All models are warmed up before the stream starts, and the
 callback drains to the freshest processed block, so mouth-to-ear latency stays at
 the ~200–300 ms design point instead of ratcheting after load spikes.
 
+### Call mode — clean audio INTO Google Meet / Zoom / Teams
+
+VoiceISO sits between the physical microphone and the conferencing app, so
+the person on the other side hears the denoised stream (the Krisp topology).
+macOS needs a free virtual audio driver as the hand-off point — one-time
+setup:
+
+```bash
+brew install blackhole-2ch
+```
+
+Then (either path):
+
+- **CLI:** `python -m voiceiso live --output BlackHole`
+- **App:** `./run.sh`, set *Output device* → `BlackHole 2ch`
+
+…and in **Google Meet → Settings → Audio → Microphone**, select
+**BlackHole 2ch**. The far side now receives the processed audio. Your real
+mic stays selected inside VoiceISO; Meet's own noise cancellation should be
+turned OFF to demo ours. `python -m voiceiso devices` lists devices and flags
+usable call-mode sinks.
+
+Notes: you will not hear yourself locally in this mode (normal for calls —
+the far end hears the clean stream); mouth-to-ear adds ~200–300 ms, fine for
+a demo call. To also monitor locally, create a Multi-Output Device in
+*Audio MIDI Setup* combining BlackHole + your headphones and use that as
+VoiceISO's output.
+
 ### Live-demo checklist
 
 - Launch with `./run.sh` (pins the venv — running the system Python silently

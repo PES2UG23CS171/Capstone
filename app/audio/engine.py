@@ -323,11 +323,16 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     stream: Optional[sd.Stream] = None
 
     def _open_stream() -> sd.Stream:
+        # Up to 2 output channels (clamped to device capability): mono into a
+        # stereo device (speakers, BlackHole virtual mic) would otherwise
+        # leave one channel silent; the callback duplicates mono into both.
+        out_info = sd.query_devices(output_dev, "output")
+        out_ch = max(1, min(2, int(out_info["max_output_channels"])))
         s = sd.Stream(
             samplerate=cfg.sample_rate,
             blocksize=cfg.block_size,
             device=(input_dev, output_dev),
-            channels=cfg.channels,
+            channels=(cfg.channels, out_ch),
             dtype=cfg.dtype,
             callback=_audio_callback,
             latency="high",

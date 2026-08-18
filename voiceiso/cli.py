@@ -65,7 +65,31 @@ def cmd_enhance(args) -> None:
 
 def cmd_live(args) -> None:
     from voiceiso.io.audio_stream import LiveStream
-    LiveStream(PipelineConfig()).run(duration_s=args.duration)
+    LiveStream(PipelineConfig(),
+               input_device=args.input_device,
+               output_device=args.output_device).run(duration_s=args.duration)
+
+
+def cmd_devices(args) -> None:
+    """List audio devices; flag virtual devices usable as a call-mode sink."""
+    import sounddevice as sd
+    virtual_markers = ("blackhole", "loopback", "vb-cable", "soundflower")
+    found_virtual = False
+    for i, d in enumerate(sd.query_devices()):
+        tags = []
+        if d["max_input_channels"]:
+            tags.append(f"in:{d['max_input_channels']}")
+        if d["max_output_channels"]:
+            tags.append(f"out:{d['max_output_channels']}")
+        v = any(m in d["name"].lower() for m in virtual_markers)
+        found_virtual |= v
+        print(f"  [{i:2d}] {d['name']:<40s} {' '.join(tags):<12s}"
+              f" {int(d['default_samplerate'])} Hz{'   <- VIRTUAL (call-mode sink)' if v else ''}")
+    if not found_virtual:
+        print("\nNo virtual audio device found. For call mode (Google Meet etc.) "
+              "install BlackHole:\n    brew install blackhole-2ch\n"
+              "then: python -m voiceiso live --output BlackHole  (and select "
+              "'BlackHole 2ch' as the microphone in the conferencing app).")
 
 
 # SNR sweep points (dB) and the noise classes for per-class evaluation.
@@ -241,8 +265,17 @@ def main() -> None:
     e = sub.add_parser("enhance"); e.add_argument("input"); e.add_argument("output", nargs="?")
     e.set_defaults(func=cmd_enhance)
 
-    l = sub.add_parser("live"); l.add_argument("--duration", type=float, default=0.0)
+    l = sub.add_parser("live", help="mic → pipeline → output device")
+    l.add_argument("--duration", type=float, default=0.0)
+    l.add_argument("--input", dest="input_device", default=None,
+                   help="input device (index or name substring, e.g. 'MacBook')")
+    l.add_argument("--output", dest="output_device", default=None,
+                   help="output device (index or name substring). Call mode: "
+                        "'BlackHole' → then pick BlackHole as the mic in Meet/Zoom")
     l.set_defaults(func=cmd_live)
+
+    d = sub.add_parser("devices", help="list audio devices (flags call-mode sinks)")
+    d.set_defaults(func=cmd_devices)
 
     b = sub.add_parser("bench")
     b.add_argument("--snr", type=float, default=5.0, help="input SNR (dB) for single / per-class runs")
