@@ -29,11 +29,34 @@ except Exception:  # pragma: no cover
     sd = None
 
 
+def resolve_device(spec, kind: str):
+    """Resolve a device by index or case-insensitive name substring.
+
+    ``kind`` is 'input' or 'output' (validates channel capability).
+    Returns the device index, or None for the system default.
+    """
+    if spec is None or spec == "":
+        return None
+    if isinstance(spec, int) or (isinstance(spec, str) and spec.isdigit()):
+        return int(spec)
+    want = str(spec).lower()
+    ch_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    matches = [i for i, d in enumerate(sd.query_devices())
+               if want in d["name"].lower() and d[ch_key] > 0]
+    if not matches:
+        names = [d["name"] for d in sd.query_devices()
+                 if d[ch_key] > 0]
+        raise SystemExit(f"no {kind} device matching {spec!r}. Available: {names}")
+    return matches[0]
+
+
 class LiveStream:
     def __init__(self, cfg: Optional[PipelineConfig] = None, block_ms: float = 100.0,
-                 enh_threads: int = 4) -> None:
+                 enh_threads: int = 4, input_device=None, output_device=None) -> None:
         if sd is None:
             raise ImportError("sounddevice is required for LiveStream")
+        self.in_dev = resolve_device(input_device, "input")
+        self.out_dev = resolve_device(output_device, "output")
         self.cfg = cfg or PipelineConfig()
         self.block = int(self.cfg.sample_rate * block_ms / 1000.0)
         self.pipe = StreamingPipeline(self.cfg, enh_threads=enh_threads)
@@ -129,8 +152,19 @@ class LiveStream:
         print(f"  block={self.block} samples ({1000.0*self.block/self.cfg.sample_rate:.1f} ms),"
               f" queue_maxsize={self._in_q.maxsize}, latency={self.cfg.live_latency_mode!r}")
         latency_mode = self.cfg.live_latency_mode if hasattr(self.cfg, "live_latency_mode") else "low"
+        if self.in_dev is not None or self.out_dev is not None:
+            names = sd.query_devices()
+            print(f"  devices: in={names[self.in_dev]['name'] if self.in_dev is not None else '(default)'}"
+                  f" → out={names[self.out_dev]['name'] if self.out_dev is not None else '(default)'}")
+        # Open up to 2 output channels (clamped to the device's capability):
+        # a mono stream into a stereo virtual device (BlackHole) would leave
+        # channel 2 silent, and a conferencing app's stereo→mono downmix
+        # would lose 6 dB.  The callback duplicates mono into both channels.
+        out_info = sd.query_devices(self.out_dev, "output")
+        out_ch = max(1, min(2, int(out_info["max_output_channels"])))
         with sd.Stream(samplerate=self.cfg.sample_rate, blocksize=self.block,
-                       channels=self.cfg.channels, dtype="float32",
+                       device=(self.in_dev, self.out_dev),
+                       channels=(self.cfg.channels, out_ch), dtype="float32",
                        callback=self._callback, latency=latency_mode):
             try:
                 if duration_s > 0:
