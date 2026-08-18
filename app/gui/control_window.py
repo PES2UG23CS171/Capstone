@@ -1,38 +1,37 @@
-"""
-PyQt6 control window — the settings panel for the audio filter.
+"""PyQt6 control window — the settings panel for the audio filter.
 
-Provides:
-    • On / Off toggle for noise suppression
-    • Strength slider (0 – 100 %)
-    • Output gain slider (-12 … +6 dB — positive gain capped: above +6 dB an
-      open-speaker demo howls, since DFN3 preserves the returning speech)
-    • Input / output device combo-boxes
-    • Real-time input & output level meters
-    • Status bar with x-run counter
+Layout (top to bottom):
+    header   : app name, live status dot (starting / running / died), RTF
+    toggle   : hero Suppression ON/OFF pill
+    devices  : mic + output combos, with an automatic "Call mode" badge when
+               the output is a virtual sink (BlackHole/Loopback/VB-Cable) —
+               i.e. the far side of a Meet/Zoom call hears the clean stream
+    sliders  : strength (0–100 %), output gain (−12 … +6 dB; capped for
+               open-speaker feedback safety)
+    meters   : input / output level bars (dBFS)
+    A/B      : momentary-style raw-mic passthrough for live comparisons
 
-The window is designed to be shown / hidden from the system tray and does
-**not** terminate the application when closed — it simply hides itself.
+The window hides (not quits) on close so the tray icon stays active.  All
+engine communication goes through the AudioEngineHandle command/event queues;
+this class never touches audio directly.
 """
 
 from __future__ import annotations
 
-import queue
+import time
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QFont, QIcon
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QComboBox,
-    QFrame,
-    QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSlider,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -47,6 +46,57 @@ from app.ipc.messages import (
     StatusPayload,
 )
 
+_VIRTUAL_SINKS = ("blackhole", "loopback", "vb-cable", "soundflower")
+
+_QSS = """
+QMainWindow, QWidget { background: #14161a; color: #e5e7eb;
+                       font-size: 13px; }
+QLabel[cls="title"]   { font-size: 17px; font-weight: 700; color: #f3f4f6; }
+QLabel[cls="caption"] { font-size: 11px; color: #9ca3af; }
+QLabel[cls="section"] { font-size: 11px; font-weight: 700; color: #6b7280;
+                        letter-spacing: 1px; }
+QLabel[cls="value"]   { color: #d1d5db; }
+QLabel[cls="badge"]   { background: #123c2b; color: #34d399;
+                        border: 1px solid #1d5c42; border-radius: 9px;
+                        padding: 3px 10px; font-size: 11px; font-weight: 600; }
+
+QPushButton#toggle { background: #16a34a; color: white; border: none;
+                     border-radius: 10px; font-size: 15px; font-weight: 700;
+                     min-height: 46px; }
+QPushButton#toggle:!checked { background: #b91c1c; }
+QPushButton#toggle:hover { background: #15803d; }
+QPushButton#toggle:!checked:hover { background: #dc2626; }
+
+QPushButton#ab { background: #1f2430; color: #9ca3af;
+                 border: 1px solid #2d3442; border-radius: 8px;
+                 min-height: 32px; font-weight: 600; }
+QPushButton#ab:checked { background: #1d4ed8; color: white;
+                         border-color: #1d4ed8; }
+QPushButton#ab:hover { border-color: #4b5563; }
+
+QComboBox { background: #1f2430; border: 1px solid #2d3442; border-radius: 7px;
+            padding: 5px 10px; min-height: 22px; }
+QComboBox:hover { border-color: #4b5563; }
+QComboBox QAbstractItemView { background: #1f2430; color: #e5e7eb;
+                              selection-background-color: #1d4ed8; }
+
+QSlider::groove:horizontal { height: 5px; background: #2d3442;
+                             border-radius: 2px; }
+QSlider::sub-page:horizontal { background: #3b82f6; border-radius: 2px; }
+QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0;
+                             border-radius: 8px; background: #e5e7eb; }
+QSlider::handle:horizontal:hover { background: #ffffff; }
+QSlider:disabled::sub-page:horizontal { background: #374151; }
+
+QProgressBar { border: none; border-radius: 3px; background: #1f2430;
+               height: 10px; }
+QProgressBar::chunk { border-radius: 3px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #22c55e, stop:0.72 #facc15, stop:1.0 #ef4444); }
+
+QStatusBar { background: #101215; color: #9ca3af; font-size: 11px; }
+"""
+
 
 class LevelMeter(QProgressBar):
     """Compact horizontal level-meter (dBFS)."""
@@ -56,56 +106,47 @@ class LevelMeter(QProgressBar):
         self.setRange(-60, 0)
         self.setValue(-60)
         self.setTextVisible(False)
-        self.setFixedHeight(14)
-        self.setStyleSheet(
-            """
-            QProgressBar {
-                border: 1px solid #555;
-                border-radius: 3px;
-                background: #1e1e1e;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #22c55e, stop:0.7 #facc15, stop:1.0 #ef4444
-                );
-                border-radius: 2px;
-            }
-            """
-        )
+        self.setFixedHeight(10)
 
     def set_level(self, db: float) -> None:
         self.setValue(max(-60, min(0, int(db))))
 
 
+def _section(text: str) -> QLabel:
+    lbl = QLabel(text.upper())
+    lbl.setProperty("cls", "section")
+    return lbl
+
+
 class ControlWindow(QMainWindow):
     """Main settings window shown from the system tray."""
 
-    # Emitted when the user explicitly quits (File → Quit or tray Quit).
+    # Emitted when the user explicitly quits (tray Quit).
     quit_requested = pyqtSignal()
 
-    def __init__(
-        self,
-        engine: AudioEngineHandle,
-        parent: Optional[QWidget] = None,
-    ) -> None:
+    # Seconds an ERROR message stays pinned before STATUS may overwrite it.
+    _ERROR_HOLD_S = 8.0
+
+    def __init__(self, engine: AudioEngineHandle,
+                 parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._engine = engine
+        self._error_until = 0.0
+        self._engine_seen_alive = False
+        self._saw_status = False
 
-        self.setWindowTitle("Transient Noise Suppressor")
-        self.setMinimumWidth(420)
-        self.setMinimumHeight(380)
+        self.setWindowTitle("VoiceISO")
+        self.setMinimumWidth(440)
+        self.setStyleSheet(_QSS)
 
         self._build_ui()
         self._connect_signals()
 
-        # Poll engine events at ~20 fps
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(50)
+        self._poll_timer.setInterval(50)          # ~20 fps
         self._poll_timer.timeout.connect(self._poll_engine)
         self._poll_timer.start()
 
-        # Request initial device list
         self._engine.send(Command(CmdType.GET_DEVICES))
 
     # ── UI construction ──────────────────────────────────────────────────
@@ -114,156 +155,115 @@ class ControlWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setSpacing(12)
-        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(14)
+        root.setContentsMargins(18, 16, 18, 12)
 
-        # ── On/Off toggle + RTF label ─────────────────────────────────────
-        toggle_row = QHBoxLayout()
-        self.btn_toggle = QPushButton("Suppression: ON")
+        # Header: title + status dot + RTF caption
+        head = QHBoxLayout()
+        title = QLabel("VoiceISO")
+        title.setProperty("cls", "title")
+        head.addWidget(title)
+        head.addStretch(1)
+        self.lbl_state = QLabel("●  starting…")
+        self.lbl_state.setStyleSheet("color: #f59e0b; font-weight: 600;")
+        head.addWidget(self.lbl_state)
+        root.addLayout(head)
+
+        self.lbl_rtf = QLabel("real-time voice isolation — warming up")
+        self.lbl_rtf.setProperty("cls", "caption")
+        root.addWidget(self.lbl_rtf)
+
+        # Hero toggle
+        self.btn_toggle = QPushButton("Suppression  ON")
+        self.btn_toggle.setObjectName("toggle")
         self.btn_toggle.setCheckable(True)
         self.btn_toggle.setChecked(True)
-        self.btn_toggle.setMinimumHeight(40)
-        font = QFont()
-        font.setPointSize(13)
-        font.setBold(True)
-        self.btn_toggle.setFont(font)
-        self._style_toggle(True)
-        toggle_row.addWidget(self.btn_toggle)
+        root.addWidget(self.btn_toggle)
 
-        self.lbl_rtf = QLabel("RTF: —")
-        rtf_font = QFont()
-        rtf_font.setPointSize(9)
-        self.lbl_rtf.setFont(rtf_font)
-        self.lbl_rtf.setStyleSheet("color: #22c55e; padding-left: 8px;")
-        self.lbl_rtf.setFixedWidth(180)
-        self.lbl_rtf.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        toggle_row.addWidget(self.lbl_rtf)
-        root.addLayout(toggle_row)
+        # Devices
+        root.addWidget(_section("Devices"))
+        dev = QGridLayout()
+        dev.setHorizontalSpacing(10)
+        dev.setVerticalSpacing(8)
+        dev.addWidget(QLabel("Mic"), 0, 0)
+        self.combo_input = QComboBox()
+        dev.addWidget(self.combo_input, 0, 1)
+        dev.addWidget(QLabel("Output"), 1, 0)
+        self.combo_output = QComboBox()
+        dev.addWidget(self.combo_output, 1, 1)
+        dev.setColumnStretch(1, 1)
+        root.addLayout(dev)
 
-        # ── Passthrough toggle (Demo mode) ───────────────────────────────
-        self.btn_passthrough = QPushButton("🔊  Pass-Through (Demo)")
-        self.btn_passthrough.setCheckable(True)
-        self.btn_passthrough.setChecked(False)
-        self.btn_passthrough.setMinimumHeight(36)
-        pt_font = QFont()
-        pt_font.setPointSize(11)
-        pt_font.setBold(True)
-        self.btn_passthrough.setFont(pt_font)
-        self.btn_passthrough.setStyleSheet(
-            "QPushButton { background-color: #333; color: #aaa; border-radius: 6px; }"
-            "QPushButton:checked { background-color: #2563eb; color: white; }"
-            "QPushButton:hover { background-color: #444; }"
-            "QPushButton:checked:hover { background-color: #3b82f6; }"
-        )
-        root.addWidget(self.btn_passthrough)
+        self.lbl_callmode = QLabel("☎  Call mode — the far side hears the clean stream")
+        self.lbl_callmode.setProperty("cls", "badge")
+        self.lbl_callmode.setVisible(False)
+        root.addWidget(self.lbl_callmode, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        # ── Strength slider ──────────────────────────────────────────────
-        grp_strength = QGroupBox("Suppression Strength")
-        lay_strength = QHBoxLayout(grp_strength)
+        # Sliders
+        root.addWidget(_section("Processing"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        grid.addWidget(QLabel("Strength"), 0, 0)
         self.slider_strength = QSlider(Qt.Orientation.Horizontal)
         self.slider_strength.setRange(0, 100)
         self.slider_strength.setValue(100)
-        self.slider_strength.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.slider_strength.setTickInterval(10)
+        grid.addWidget(self.slider_strength, 0, 1)
         self.lbl_strength = QLabel("100 %")
-        self.lbl_strength.setFixedWidth(48)
-        self.lbl_strength.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lay_strength.addWidget(self.slider_strength)
-        lay_strength.addWidget(self.lbl_strength)
-        root.addWidget(grp_strength)
+        self.lbl_strength.setProperty("cls", "value")
+        self.lbl_strength.setFixedWidth(58)
+        self.lbl_strength.setAlignment(Qt.AlignmentFlag.AlignRight
+                                       | Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(self.lbl_strength, 0, 2)
 
-        # ── Gain slider ─────────────────────────────────────────────────
-        grp_gain = QGroupBox("Output Gain")
-        lay_gain = QHBoxLayout(grp_gain)
+        grid.addWidget(QLabel("Gain"), 1, 0)
         self.slider_gain = QSlider(Qt.Orientation.Horizontal)
-        self.slider_gain.setRange(-120, 60)    # tenths of dB; +6 dB cap (feedback margin)
+        self.slider_gain.setRange(-120, 60)       # tenths of dB; +6 dB cap
         self.slider_gain.setValue(0)
-        self.slider_gain.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.slider_gain.setTickInterval(30)
-        self.lbl_gain = QLabel("0.0 dB")
-        self.lbl_gain.setFixedWidth(60)
-        self.lbl_gain.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lay_gain.addWidget(self.slider_gain)
-        lay_gain.addWidget(self.lbl_gain)
-        root.addWidget(grp_gain)
+        grid.addWidget(self.slider_gain, 1, 1)
+        self.lbl_gain = QLabel("+0.0 dB")
+        self.lbl_gain.setProperty("cls", "value")
+        self.lbl_gain.setFixedWidth(58)
+        self.lbl_gain.setAlignment(Qt.AlignmentFlag.AlignRight
+                                   | Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(self.lbl_gain, 1, 2)
+        grid.setColumnStretch(1, 1)
+        root.addLayout(grid)
 
-        # ── Device selectors ─────────────────────────────────────────────
-        grp_dev = QGroupBox("Audio Devices")
-        lay_dev = QVBoxLayout(grp_dev)
-
-        lay_in = QHBoxLayout()
-        lay_in.addWidget(QLabel("Input:"))
-        self.combo_input = QComboBox()
-        self.combo_input.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        lay_in.addWidget(self.combo_input, 1)
-        lay_dev.addLayout(lay_in)
-
-        lay_out = QHBoxLayout()
-        lay_out.addWidget(QLabel("Output:"))
-        self.combo_output = QComboBox()
-        self.combo_output.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        lay_out.addWidget(self.combo_output, 1)
-        lay_dev.addLayout(lay_out)
-
-        root.addWidget(grp_dev)
-
-        # ── Level meters ────────────────────────────────────────────────
-        grp_meters = QGroupBox("Levels (dBFS)")
-        lay_meters = QVBoxLayout(grp_meters)
-
-        lay_m_in = QHBoxLayout()
-        lay_m_in.addWidget(QLabel("In "))
+        # Meters
+        root.addWidget(_section("Levels"))
+        meters = QGridLayout()
+        meters.setHorizontalSpacing(10)
+        meters.setVerticalSpacing(8)
+        meters.addWidget(QLabel("In"), 0, 0)
         self.meter_in = LevelMeter()
-        lay_m_in.addWidget(self.meter_in, 1)
-        self.lbl_in_db = QLabel("-∞")
-        self.lbl_in_db.setFixedWidth(48)
-        self.lbl_in_db.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lay_m_in.addWidget(self.lbl_in_db)
-        lay_meters.addLayout(lay_m_in)
-
-        lay_m_out = QHBoxLayout()
-        lay_m_out.addWidget(QLabel("Out"))
+        meters.addWidget(self.meter_in, 0, 1)
+        self.lbl_in_db = QLabel("−∞")
+        self.lbl_in_db.setProperty("cls", "value")
+        self.lbl_in_db.setFixedWidth(58)
+        self.lbl_in_db.setAlignment(Qt.AlignmentFlag.AlignRight
+                                    | Qt.AlignmentFlag.AlignVCenter)
+        meters.addWidget(self.lbl_in_db, 0, 2)
+        meters.addWidget(QLabel("Out"), 1, 0)
         self.meter_out = LevelMeter()
-        lay_m_out.addWidget(self.meter_out, 1)
-        self.lbl_out_db = QLabel("-∞")
-        self.lbl_out_db.setFixedWidth(48)
-        self.lbl_out_db.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        lay_m_out.addWidget(self.lbl_out_db)
-        lay_meters.addLayout(lay_m_out)
+        meters.addWidget(self.meter_out, 1, 1)
+        self.lbl_out_db = QLabel("−∞")
+        self.lbl_out_db.setProperty("cls", "value")
+        self.lbl_out_db.setFixedWidth(58)
+        self.lbl_out_db.setAlignment(Qt.AlignmentFlag.AlignRight
+                                     | Qt.AlignmentFlag.AlignVCenter)
+        meters.addWidget(self.lbl_out_db, 1, 2)
+        meters.setColumnStretch(1, 1)
+        root.addLayout(meters)
 
-        root.addWidget(grp_meters)
+        # A/B raw-mic comparison (passthrough)
+        self.btn_passthrough = QPushButton("A / B  —  hear the RAW mic")
+        self.btn_passthrough.setObjectName("ab")
+        self.btn_passthrough.setCheckable(True)
+        root.addWidget(self.btn_passthrough)
 
-        # ── Proof of Concept button ──────────────────────────────────────
-        self.btn_poc = QPushButton("View Graph in the GUI")
-        self.btn_poc.setMinimumHeight(36)
-        poc_font = QFont()
-        poc_font.setPointSize(11)
-        poc_font.setBold(True)
-        self.btn_poc.setFont(poc_font)
-        self.btn_poc.setStyleSheet(
-            "QPushButton { background-color: #2563eb; color: white; border-radius: 6px; }"
-            "QPushButton:hover { background-color: #3b82f6; }"
-        )
-        self.btn_poc.clicked.connect(self._open_waveform_viewer)
-        root.addWidget(self.btn_poc)
-
-        # ── Status bar ──────────────────────────────────────────────────
         self.statusBar().showMessage("Engine starting…")
-
-        # ── Waveform viewer reference ────────────────────────────────────
-        self._waveform_viewer = None
-
-    # ── Styling ──────────────────────────────────────────────────────────
-
-    def _style_toggle(self, on: bool) -> None:
-        if on:
-            self.btn_toggle.setStyleSheet(
-                "QPushButton { background-color: #22c55e; color: white; border-radius: 6px; }"
-            )
-        else:
-            self.btn_toggle.setStyleSheet(
-                "QPushButton { background-color: #ef4444; color: white; border-radius: 6px; }"
-            )
 
     # ── Signal wiring ────────────────────────────────────────────────────
 
@@ -278,24 +278,22 @@ class ControlWindow(QMainWindow):
     # ── Slots ────────────────────────────────────────────────────────────
 
     def _on_toggle(self, checked: bool) -> None:
-        self.btn_toggle.setText(f"Suppression: {'ON' if checked else 'OFF'}")
-        self._style_toggle(checked)
+        self.btn_toggle.setText(f"Suppression  {'ON' if checked else 'OFF'}")
         self._engine.send(Command(CmdType.SET_ENABLED, checked))
 
     def _on_passthrough(self, checked: bool) -> None:
         self._engine.send(Command(CmdType.SET_PASSTHROUGH, checked))
         self.btn_passthrough.setText(
-            "🔊  Pass-Through ACTIVE" if checked else "🔊  Pass-Through (Demo)"
-        )
-        # Grey out suppression controls in passthrough mode
+            "A / B  —  RAW MIC (unprocessed!)" if checked
+            else "A / B  —  hear the RAW mic")
+        # Suppression controls are inert while raw audio bypasses the chain.
         self.slider_strength.setEnabled(not checked)
         self.btn_toggle.setEnabled(not checked)
         self.slider_gain.setEnabled(not checked)
 
     def _on_strength(self, value: int) -> None:
-        pct = value / 100.0
         self.lbl_strength.setText(f"{value} %")
-        self._engine.send(Command(CmdType.SET_STRENGTH, pct))
+        self._engine.send(Command(CmdType.SET_STRENGTH, value / 100.0))
 
     def _on_gain(self, value: int) -> None:
         db = value / 10.0
@@ -311,15 +309,12 @@ class ControlWindow(QMainWindow):
         dev_idx = self.combo_output.itemData(index)
         if dev_idx is not None:
             self._engine.send(Command(CmdType.SET_OUTPUT_DEVICE, dev_idx))
+        name = self.combo_output.itemText(index).lower()
+        self.lbl_callmode.setVisible(any(m in name for m in _VIRTUAL_SINKS))
 
     # ── Engine event polling ─────────────────────────────────────────────
 
-    # Seconds an ERROR message stays pinned before STATUS may overwrite it
-    # (the 20 Hz status refresh previously wiped errors within ~50 ms).
-    _ERROR_HOLD_S = 8.0
-
     def _poll_engine(self) -> None:
-        import time as _time
         for evt in self._engine.poll_events():
             if evt.kind == EvtType.STATUS:
                 self._saw_status = True
@@ -327,20 +322,21 @@ class ControlWindow(QMainWindow):
             elif evt.kind == EvtType.DEVICE_LIST:
                 self._handle_device_list(evt.payload)
             elif evt.kind == EvtType.ERROR:
-                self._error_until = _time.monotonic() + self._ERROR_HOLD_S
+                self._error_until = time.monotonic() + self._ERROR_HOLD_S
                 self.statusBar().showMessage(f"⚠  {evt.payload}")
             elif evt.kind == EvtType.ENGINE_STOPPED:
                 self.statusBar().showMessage("Engine stopped.")
-        # Death check.  Two windows are covered: (a) after the engine has been
-        # seen alive (any STATUS), and (b) STARTUP — the engine process died
-        # during model load / warm-up, before its first STATUS (previously the
-        # GUI showed "Engine starting…" forever over a dead process).
+        # Death check covers both the running phase and STARTUP (a crash
+        # during model load / warm-up, before the first STATUS).
         alive = self._engine.alive
-        if getattr(self, "_engine_seen_alive", False) and not alive:
+        if self._engine_seen_alive and not alive:
+            self.lbl_state.setText("●  engine died")
+            self.lbl_state.setStyleSheet("color: #ef4444; font-weight: 700;")
             self.statusBar().showMessage(
                 "🔴 ENGINE PROCESS DIED — audio has stopped. Restart the app.")
             self.meter_in.set_level(-120.0)
             self.meter_out.set_level(-120.0)
+            return
         if alive:
             self._engine_seen_alive = True
 
@@ -349,70 +345,51 @@ class ControlWindow(QMainWindow):
         self.meter_out.set_level(s.output_level_db)
 
         def _fmt(db: float) -> str:
-            return "-∞" if db <= -120 else f"{db:.0f}"
+            return "−∞" if db <= -120 else f"{db:.0f} dB"
 
         self.lbl_in_db.setText(_fmt(s.input_level_db))
         self.lbl_out_db.setText(_fmt(s.output_level_db))
 
-        # Update RTF label
+        self.lbl_state.setText("●  running")
+        self.lbl_state.setStyleSheet("color: #22c55e; font-weight: 600;")
         if s.rtf > 0:
-            headroom = 1.0 / s.rtf if s.rtf > 0 else 9999
-            self.lbl_rtf.setText(f"RTF: {s.rtf:.4f}  ({headroom:.0f}× headroom)")
+            self.lbl_rtf.setText(
+                f"RTF {s.rtf:.2f}  ·  {1.0 / s.rtf:.1f}× real-time headroom")
         else:
-            self.lbl_rtf.setText("RTF: —")
+            self.lbl_rtf.setText("real-time voice isolation")
 
-        import time as _time
-        if _time.monotonic() < getattr(self, "_error_until", 0.0):
+        if time.monotonic() < self._error_until:
             return                     # keep the pinned error visible
         xr = f"  |  x-runs: {s.xruns}" if s.xruns else ""
         self.statusBar().showMessage(f"Engine running{xr}")
 
     def _handle_device_list(self, devices: List[DeviceInfo]) -> None:
-        # Block signals while repopulating
         self.combo_input.blockSignals(True)
         self.combo_output.blockSignals(True)
-
         self.combo_input.clear()
         self.combo_output.clear()
-
-        self.combo_input.addItem("(System Default)", None)
-        self.combo_output.addItem("(System Default)", None)
+        self.combo_input.addItem("System Default", None)
+        self.combo_output.addItem("System Default", None)
 
         default_in_idx = 0
         default_out_idx = 0
-
         for d in devices:
             if d.max_input_channels > 0:
-                label = f"{d.name}  ({d.max_input_channels}ch)"
-                self.combo_input.addItem(label, d.index)
+                self.combo_input.addItem(d.name, d.index)
                 if d.is_default_input:
                     default_in_idx = self.combo_input.count() - 1
-
             if d.max_output_channels > 0:
-                label = f"{d.name}  ({d.max_output_channels}ch)"
-                self.combo_output.addItem(label, d.index)
+                self.combo_output.addItem(d.name, d.index)
                 if d.is_default_output:
                     default_out_idx = self.combo_output.count() - 1
 
         self.combo_input.setCurrentIndex(default_in_idx)
         self.combo_output.setCurrentIndex(default_out_idx)
-
         self.combo_input.blockSignals(False)
         self.combo_output.blockSignals(False)
-
-    # ── Waveform viewer ───────────────────────────────────────────────────
-
-    def _open_waveform_viewer(self) -> None:
-        """Open the Proof of Concept waveform viewer window."""
-        from app.gui.waveform_viewer import WaveformViewer
-
-        if self._waveform_viewer is not None and self._waveform_viewer.isVisible():
-            self._waveform_viewer.raise_()
-            self._waveform_viewer.activateWindow()
-            return
-
-        self._waveform_viewer = WaveformViewer(parent=None)
-        self._waveform_viewer.show()
+        # Reflect the (restored) output selection in the call-mode badge.
+        name = self.combo_output.currentText().lower()
+        self.lbl_callmode.setVisible(any(m in name for m in _VIRTUAL_SINKS))
 
     # ── Window behaviour ─────────────────────────────────────────────────
 
