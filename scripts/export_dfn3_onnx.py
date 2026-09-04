@@ -11,7 +11,7 @@ Cut the live deployment footprint:
 
 This is an offline tool — it does NOT modify the live pipeline.  After running
 it, the produced ``dfn3_int8.onnx`` can be loaded by an alternative
-Enhancement backend (not implemented here; see Section 9 of ARCHITECTURE.md
+Enhancement backend (not implemented here; see Section 9 of Docs/ARCHITECTURE.md
 for the integration plan).
 
 Caveats

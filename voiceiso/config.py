@@ -221,7 +221,7 @@ class PipelineConfig:
             # Explicit head override (e.g. VOICEISO_HEAD=checkpoints/
             # efficientat_head12_v4.onnx enables the opt-in TV-rejection head,
             # which trades −0.02 FSD50K macro-F1 for 0.54→0.86 loudspeaker-
-            # speech rejection — see ARCHITECTURE.md §10).
+            # speech rejection — see Docs/ARCHITECTURE.md §10).
             env_head = _os.environ.get("VOICEISO_HEAD")
             if env_head:
                 cand = Path(env_head)

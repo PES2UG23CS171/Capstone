@@ -1,7 +1,7 @@
 """
 Retrain the 12-class head on FSD50K.dev_audio with the CORRECTED protocol.
 
-Protocol (audit fix — see ARCHITECTURE.md §10 / README):
+Protocol (audit fix — see Docs/ARCHITECTURE.md §10 / README):
   * train/val  ← FSD50K.dev_audio, UPLOADER-GROUPED (no Freesound uploader spans
     train and val), so val is an honest generalisation estimate.
   * test       ← FSD50K.eval_audio only (the official held-out set, uploader-
