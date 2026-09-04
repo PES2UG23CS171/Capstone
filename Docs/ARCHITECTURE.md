@@ -1,4 +1,4 @@
-f# voiceiso — Architecture & Function Reference
+# voiceiso — Architecture & Function Reference
 
 > **CPU-only, real-time voice isolation** in the spirit of Apple Voice Isolation
 > and Krisp. The enhancement *brain* is **DeepFilterNet3 (DFN3)**; the capstone

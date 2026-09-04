@@ -150,7 +150,7 @@ def run_benchmark(pairs: List[Tuple[np.ndarray, np.ndarray]], sr: int = 48_000,
     ``block_ms`` is the block size the pipeline is driven at.  Default 100 ms to
     MATCH the live paths (AppConfig.block_size, LiveStream) — DFN3's design point
     where it has enough per-call STFT context to actually enhance (at 20 ms,
-    SI-SDRi is negative; see ARCHITECTURE.md §1.4).  Pass ``block_ms=20`` to see
+    SI-SDRi is negative; see Docs/ARCHITECTURE.md §1.4). Pass ``block_ms=20`` to see
     the low-latency-but-low-quality point.  This is the honest, demo-matching
     operating point — the old code hard-coded 100 ms (= ``cfg.win*5``) too, but
     the app then shipped 20 ms, so the headline numbers didn't match the demo.

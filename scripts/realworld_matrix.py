@@ -17,7 +17,7 @@ Conditions map to the demo vocabulary:
   competing speech → competing_speech;  café → competing_speech babble;
   traffic → traffic.
 
-Writes a markdown table to REALWORLD_RESULTS.md and prints it.
+Writes a markdown table to Docs/REALWORLD_RESULTS.md and prints it.
 
 Run:  PYTHONPATH=<repo> .venv_poc/bin/python -m scripts.realworld_matrix
 """
@@ -92,8 +92,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Real-world condition matrix: {noise} × {silence,speech} × SNR "
                     "through the full deployed pipeline (multi-minute run).")
-    ap.add_argument("--out", default="REALWORLD_RESULTS.md",
-                    help="output markdown path (default: REALWORLD_RESULTS.md in cwd)")
+    ap.add_argument("--out", default="Docs/REALWORLD_RESULTS.md",
+                    help="output markdown path (default: Docs/REALWORLD_RESULTS.md in cwd)")
     args = ap.parse_args()
 
     by = eval_rows()

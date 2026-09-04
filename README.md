@@ -5,7 +5,7 @@ Isolation) built around **DeepFilterNet3** on CPU, wrapped with preprocessing,
 AEC, Silero VAD, a **learned EfficientAT 12-class noise classifier**, a dynamic
 suppression controller, speech preservation, and a residual post-filter.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and stage reference.
+See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the full design and stage reference.
 
 ## Quick start (clean clone)
 
@@ -47,7 +47,7 @@ python -m app.main                              # desktop app (GUI + tray)
 
 The live paths run DFN3 at **100 ms blocks on a worker thread** (DFN3's efficient
 design point; it has no cross-call GRU memory, so 20 ms blocks measurably degrade
-quality — see ARCHITECTURE.md §1.4). The audio callback never runs the network,
+quality — see Docs/ARCHITECTURE.md §1.4). The audio callback never runs the network,
 so it is xrun-safe. All models are warmed up before the stream starts, and the
 callback drains to the freshest processed block, so mouth-to-ear latency stays at
 the ~200–300 ms design point instead of ratcheting after load spikes.
@@ -108,7 +108,7 @@ VoiceISO's output.
 4. **Phone playing a voice next to you** *(optional segment)* — relaunch with
    `VOICEISO_HEAD=checkpoints/efficientat_head12_v4.onnx ./run.sh` to enable
    the TV-rejection head (0.86 loudspeaker rejection vs 0.54 default; the
-   trade-off is documented in ARCHITECTURE.md §10).
+   trade-off is documented in Docs/ARCHITECTURE.md §10).
 5. To let the audience hear the processed stream: record with
    `python -m scripts.live_probe` and play `diag_capture/probe_out.wav`, or
    route the app's output into a call. The room itself always carries the
@@ -138,7 +138,7 @@ harness in-process), per-block p99 66 ms vs the 100 ms budget, peak RSS
 ~560 MB (harness-inclusive).
 
 Real-condition behaviour on held-out FSD50K eval clips
-([REALWORLD_RESULTS.md](REALWORLD_RESULTS.md)): silence-regime attenuation
+([Docs/REALWORLD_RESULTS.md](Docs/REALWORLD_RESULTS.md)): silence-regime attenuation
 **fan +38 dB, clap +45 dB, traffic +38 dB, keyboard +27 dB, TV +19 dB,
 competing speech +23 dB**; during speech at 0 dB SNR, SI-SDRi from **+4.1
 (TV) to +10.2 (keyboard)**.
@@ -166,7 +166,7 @@ v2, but in the live-mic transient regime it is markedly more robust: with a
 16/24 → **21/24** (uploader-disjoint val clips). v1's row is invalid (30 % of
 the test clips were in its training pool). The remaining gap to the 0.70
 macro-F1 target is the **frozen mn10_as embedding ceiling** plus data-starved
-classes (`fan`: 64 dev clips → F1 0.40); see ARCHITECTURE.md §10.
+classes (`fan`: 64 dev clips → F1 0.40); see Docs/ARCHITECTURE.md §10.
 
 **Opt-in v4 "TV-rejection" head** (`VOICEISO_HEAD=checkpoints/efficientat_head12_v4.onnx`):
 trained with synthesized loudspeaker/TV speech (the `tv` class had ZERO
