@@ -35,3 +35,24 @@ checkpoints/dev_emb_cache_v4.npz
 
 # Downloaded by scripts/fetch_dnsmos.py — not redistributed
 checkpoints/sig_bak_ovr.onnx
+
+# Scratch/working directories left behind by other local AI-assisted sessions
+.codex-*/
+
+# Office lock files (~$file.pptx etc.)
+~$*
+
+# Personal working notes — not part of the deliverable
+Brief.rtf
+
+# Presentation source material (slide decks, panel photos, drafts, PDFs) —
+# kept locally for prep; the public repo ships only the written engineering
+# reports already tracked directly under Docs/ (ARCHITECTURE.md,
+# REVIEW_REPORT.md, REALWORLD_RESULTS.md).
+Docs/Phase 1/
+Docs/Phase 2/
+Docs/Phase 3/
+Docs/Panel Sign/
+Docs/Capstone Cheat Sheet.pdf
+Docs/ARCHITECTURE_DEEP_DIVE.md
+Docs/TECHNICAL_DEEP_DIVE.md
