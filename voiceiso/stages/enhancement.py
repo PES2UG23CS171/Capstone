@@ -50,6 +50,7 @@ Design decisions (validated empirically on real LibriSpeech + noise):
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import numpy as np
 
@@ -269,16 +270,81 @@ class Enhancement(Stage):
         # frame's atten_lim_db cap after an over-suppression event.  Decays
         # over a few frames so we don't permanently relax the enhancer.
         self._cap_relief_db = 0.0
+        # Speech-energy-floor guard: previous block's dry-blend mix (ramped) and
+        # the running speech-band level of the WET output on confident speech.
+        self._floor_mix_prev = 0.0
+        self._wet_env_db: Optional[float] = None
 
     def reset(self) -> None:
         """Reset per-stream state.
 
         There is no persistent DfState to clear (a fresh one is built per
-        call — see ``_enhance``); only the raw-input history buffer and the
-        rollback cap relief carry across blocks.
+        call — see ``_enhance``); only the raw-input history buffer, the
+        rollback cap relief and the floor-guard mix carry across blocks.
         """
         self._cap_relief_db = 0.0
+        self._floor_mix_prev = 0.0
+        self._wet_env_db = None
         self._hist = np.zeros(self._hist_len, dtype=np.float32)
+
+    @staticmethod
+    def _speech_band_energy(x: np.ndarray, sr: int, lo: float = 300.0, hi: float = 3400.0) -> float:
+        mag = np.abs(np.fft.rfft(x.astype(np.float64))) ** 2
+        f = np.fft.rfftfreq(len(x), 1.0 / sr)
+        return float(mag[(f >= lo) & (f < hi)].sum()) + 1e-12
+
+    def _speech_floor_guard(self, wet: np.ndarray, dry: np.ndarray, vad_prob: float,
+                            meta: dict) -> np.ndarray:
+        """Bound how far the network may drop a CONFIDENT-speech block.
+
+        A block is treated as a *dropout* (speech removed) — not legitimate
+        noise removal — only when BOTH hold, with ``vad_prob ≥ speech_floor_vad``:
+          1. the wet block's speech-band (300–3400 Hz) energy is more than
+             ``speech_floor_db`` below the DRY block's (something was removed),
+          2. it is also more than ``speech_floor_db`` below the running
+             speech-band level of the WET output on recent confident speech
+             (the speaker vanished from the output).
+        Condition 1 alone fires on a plate crash or traffic burst removed from
+        under the voice — the dry block is loud but the wet stays at the
+        speaker's level (measured 2026-09-08: 7–12 % of confident blocks on
+        noisy recordings, re-injecting noise); condition 2 rejects those,
+        because a genuine dropout sits 20–34 dB under the speaker's recent
+        output.  On a dropout the dry block is blended back just enough to
+        restore the floor relative to the dry; the mix ramps over 10 ms.  The
+        envelope (τ ≈ 1 s) is updated only from non-dropout blocks; before it
+        exists the dry level stands in for it.  Disabled when
+        ``speech_floor_db <= 0``.
+        """
+        floor_db = float(self.cfg.speech_floor_db)
+        mix = 0.0
+        if floor_db > 0.0 and vad_prob >= float(self.cfg.speech_floor_vad):
+            e_dry = self._speech_band_energy(dry, self.sr)
+            e_wet = self._speech_band_energy(wet, self.sr)
+            dry_db = 10.0 * np.log10(e_dry)
+            wet_db = 10.0 * np.log10(e_wet)
+            env_db = self._wet_env_db if self._wet_env_db is not None else dry_db
+            dropout = (dry_db - wet_db > floor_db) and (env_db - wet_db > floor_db)
+            if dropout:
+                a_target = np.sqrt(e_dry * 10.0 ** (-floor_db / 10.0))
+                a_dry, a_wet = np.sqrt(e_dry), np.sqrt(e_wet)
+                mix = float(np.clip((a_target - a_wet) / max(a_dry - a_wet, 1e-12), 0.0, 1.0))
+            else:
+                # Track the speaker's normal wet level (τ ≈ 1 s at 100 ms blocks).
+                a = 1.0 - float(np.exp(-len(wet) / (1.0 * self.sr)))
+                self._wet_env_db = (wet_db if self._wet_env_db is None
+                                    else self._wet_env_db + a * (wet_db - self._wet_env_db))
+        if mix > 0.0 or self._floor_mix_prev > 0.0:
+            # 10 ms ramp from the previous mix, then hold: click-free, and the
+            # block actually reaches the floor (a full-block ramp delivered only
+            # half the repair to an isolated dropout block).
+            n = len(wet)
+            r = min(n, max(1, int(round(self.sr * 0.010))))
+            ramp = np.full(n, mix, dtype=np.float32)
+            ramp[:r] = np.linspace(self._floor_mix_prev, mix, r, dtype=np.float32)
+            wet = ((1.0 - ramp) * wet + ramp * dry).astype(np.float32)
+        self._floor_mix_prev = mix
+        meta["enh_floor_mix"] = mix
+        return wet
 
     @property
     def output_delay_samples(self) -> int:
@@ -486,6 +552,9 @@ class Enhancement(Stage):
                 self._cap_relief_db = float(self.cfg.artifact_cap_relief_db) * artifact_conf
                 ctx.meta["enh_rollback"] = mix
         ctx.meta["enh_overshoot"] = overshoot
+
+        # Speech-energy-floor guard (config-gated; see _speech_floor_guard).
+        wet = self._speech_floor_guard(wet, dry, float(ctx.vad_prob), ctx.meta)
 
         ctx.audio = wet.astype("float32")
         ctx.meta["enh_wet"] = 1.0

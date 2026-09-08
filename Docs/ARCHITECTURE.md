@@ -329,6 +329,21 @@ post-filter (DFN already preserves them, so it does **not** throttle the enhance
 - **`_delayed_dry(x)`** — the dry block delayed by the same tail, used by the
   bypass path and for the dry copy kept for artifact analysis, so toggling DFN3
   on/off never splices the timeline (verified sample-exact).
+- **`_speech_floor_guard(wet, dry, vad_prob)`** — when the VAD is confident
+  (≥ `speech_floor_vad` = 0.9) and the wet block's speech-band (300–3400 Hz)
+  energy is more than `speech_floor_db` (9) below the dry block's, blends the
+  dry block back just enough to restore the floor (10 ms ramp from the previous
+  block's mix, then hold). Added 2026-09-08 for a measured streaming failure:
+  per-block DFN3 with 160 ms of context sometimes declares a creaky /
+  low-centroid phrase ending (common in female voices) to be LF noise and drops
+  it 30+ dB while one-shot DFN3 keeps it. A block counts as a dropout only if
+  the wet is > floor below BOTH the dry and the speaker's recent wet level.
+  **OFF by default (`speech_floor_db=0`)**: on the clean female voice it
+  repairs the holes (−34 → −18 dB, PESQ +0.07, male untouched) but on noisy
+  material it is net-negative (plate recording PESQ −0.16 / STOI −0.03; white
+  noise PESQ −0.03) — when DFN3 removes a burst it removes the speech under it
+  too, and the only thing the guard can blend back is the dry block with the
+  burst. Enable with `VOICEISO_CFG=speech_floor_db=9` for a quiet room.
 - **`process(ctx)`** —
   - **bypass** (passthrough dry, skip the net) when backend is passthrough **or**
     `suppression ≤ bypass_below` (controller says clean) — saves CPU;
@@ -581,6 +596,23 @@ flushes the deferred tail (final 20 ms against documented fabricated context),
 `tests/test_deferred_tail.py`. Two personal recordings served as regression
 evidence (improved on all measured metrics except one flat SI-SDRi); they are
 not a representative evaluation set.
+(5) 2026-09-08/09, female-voice fix — the controller's speech cap is now
+wired to `supp_speech_floor` (0.20 → ≈ 30 dB DFN3 cap while vad ≥ 0.9; the
+code had used a constant 0.92 = 93 dB that protected nothing). Trigger: a
+clean female voice measured PESQ 3.00 vs 3.99 for a male voice, with 30+ dB
+mid-word dropouts at VAD 1.0 (streaming-context misjudgement of creaky phrase
+endings; one-shot DFN3 keeps them). Result on clean speech: female
+3.00 → 3.10 (worst hole −34 → −28 dB), male 3.99 → 4.00; standard benchmark
+SI-SDRi 4.05 → 4.12, PESQ 1.45 → 1.55, STOI 0.830 → 0.832; the two noisy
+personal recordings −0.045 / −0.023 PESQ with DNSMOS SIG/OVRL up; zero
+compute cost. Tighter caps help clean female voices more (0.10 → 3.24) but
+re-admit noise under speech on noisy material (0.15: −0.12, 0.10: −0.25 PESQ)
+— not taken. The speech-energy floor (above) is implemented but OFF by
+default: it repairs the clean female voice (holes −18 dB, PESQ +0.07) yet is
+net-negative on noisy material because the dry block it blends back carries
+the burst that was removed. Both `speech_floor_db=9` (quiet-room demo) and
+`dfn_history_ms=240` (female 3.29 with cap+floor, +9 % compute) are usable via
+`VOICEISO_CFG="speech_floor_db=9,dfn_history_ms=240"`.
 
 **Remaining next steps:** (1) learned noise classifier (YAMNet / EfficientAT ONNX);
 (2) VoiceFilter-Lite target-speaker extraction; (3) export DFN to ONNX + INT8 to cut

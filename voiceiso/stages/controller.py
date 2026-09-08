@@ -144,10 +144,15 @@ class DynamicController(Stage):
 
         modifier = _CLASS_SUPP_MODIFIER.get(ctx.noise_class, 0.85)
 
-        # Speech-protection floor: when vad_prob is high, never go above 0.92
-        # (so DFN's atten cap never reaches the most aggressive end of the range
-        # while we are confident speech is active).
-        speech_cap = float(np.interp(ctx.vad_prob, [0.4, 0.9], [1.0, 0.92]))
+        # Speech-protection cap: while the VAD is confident, suppression may not
+        # exceed ``cfg.supp_speech_floor`` (smoothly from vad 0.4 → 0.9).  DFN3's
+        # attenuation cap follows suppression (12 … 100 dB), and on confident
+        # speech a high cap only bounds how much of the SPEECH the network may
+        # remove when it misjudges a block — measured 2026-09-08 on a female
+        # voice: 30+ dB mid-word dropouts at cap 60 dB.  (An earlier constant
+        # of 0.92 = 93 dB cap protected nothing.)
+        speech_cap = float(np.interp(ctx.vad_prob, [0.4, 0.9],
+                                     [1.0, float(self.cfg.supp_speech_floor)]))
 
         # Whisper protection: whispered speech is unvoiced, HF-dominant, and
         # quiet — DFN3's default attenuation will treat it as noise.  Halve

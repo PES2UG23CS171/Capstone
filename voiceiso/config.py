@@ -56,9 +56,39 @@ class PipelineConfig:
     # ── Dynamic suppression controller bounds ────────────────────────────
     supp_min: float = 0.0              # never suppress below this (dry passthrough)
     supp_max: float = 1.0              # fully wet (max suppression)
-    supp_speech_floor: float = 0.55    # cap suppression while speech is active
+    # Cap on suppression while the VAD is confident (vad_prob ≥ 0.9; smooth
+    # from 0.4) → DFN3 attenuation cap 12 + 0.10·88 ≈ 21 dB on confident
+    # speech.  Was declared but never wired (the controller used a constant
+    # 0.92 = a 93 dB cap that protected nothing; 0.92 reproduces that).
+    # 0.20 since 2026-09-08 (female-voice fix) → DFN3 cap ≈ 30 dB on confident
+    # speech.  Clean speech PESQ female 3.00→3.10 (worst mid-word hole −34→
+    # −28 dB), male 3.99→4.00; standard +5 dB benchmark SI-SDRi 4.05→4.12,
+    # PESQ 1.45→1.55, STOI 0.830→0.832; noisy plate recording PESQ −0.045,
+    # STOI −0.002.  Tighter caps help clean female voices more (0.10 → 3.24)
+    # but re-admit noise under speech on noisy material (0.15: −0.12 PESQ,
+    # 0.10: −0.25) — 0.20 is the value that helps without hurting.
+    supp_speech_floor: float = 0.20
     supp_attack_ms: float = 30.0       # how fast aggressiveness ramps up
     supp_release_ms: float = 150.0     # how fast it ramps down (avoid pumping)
+
+    # ── Speech energy floor (Enhancement) ────────────────────────────────
+    # When the VAD is confident (≥ speech_floor_vad), the enhanced block may
+    # not fall more than ``speech_floor_db`` below the dry block in the speech
+    # band (300–3400 Hz); the shortfall is repaired by blending the dry block
+    # back (per-sample ramped).  Targets a measured streaming failure: per-
+    # block DFN3 judging creaky / low-centroid phrase endings (common in
+    # female voices) as noise and dropping them 30+ dB while one-shot DFN3
+    # keeps them.  0 disables the guard.
+    # OFF by default (measured 2026-09-08).  At 9 dB it repairs the clean
+    # female voice (worst hole −34 → −18 dB, PESQ +0.07, male untouched) but
+    # is net-negative on noisy material: when DFN3 removes a plate crash it
+    # removes the speech under it too, the wet genuinely falls below the
+    # speaker's level, and the only thing the guard can blend back is the dry
+    # block WITH the crash — noisy plate recording PESQ −0.16 / STOI −0.03,
+    # white-noise benchmark PESQ −0.03 / STOI −0.015.  Enable (e.g. 9.0) only
+    # for clean-room use; the speech cap above carries the default fix.
+    speech_floor_db: float = 0.0
+    speech_floor_vad: float = 0.9
 
     # ── Transient (clap / slam) kick — see DynamicController ─────────────
     # Values are the shipped behaviour; exposed as fields so calibration runs
@@ -237,6 +267,25 @@ class PipelineConfig:
     checkpoint_dir: str = "checkpoints"
 
     def __post_init__(self) -> None:
+        # Operational overrides without code edits, e.g. for a demo:
+        #   VOICEISO_CFG="speech_floor_db=9,dfn_history_ms=240" python -m app.main
+        # Only existing fields are accepted; values are cast to the field's type.
+        import os as _os
+        for kv in filter(None, _os.environ.get("VOICEISO_CFG", "").split(",")):
+            k, _, v = kv.strip().partition("=")
+            if not hasattr(self, k) or not v:
+                import logging as _logging
+                _logging.getLogger(__name__).warning("VOICEISO_CFG: ignoring %r (unknown field or no value)", kv)
+                continue
+            cur = getattr(self, k)
+            if isinstance(cur, bool):
+                setattr(self, k, v.strip().lower() in ("1", "true", "yes", "on"))
+            elif isinstance(cur, int):
+                setattr(self, k, int(v))
+            elif isinstance(cur, float):
+                setattr(self, k, float(v))
+            else:
+                setattr(self, k, v.strip())
         # Auto-wire the shipped native-12 EfficientAT head when the caller did
         # not pin a path, resolving it relative to the repo root so it works no
         # matter what the current working directory is.  If the checkpoint is

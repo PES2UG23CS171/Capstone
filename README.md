@@ -170,14 +170,14 @@ Synthetic +5 dB white-noise condition (`python -m voiceiso bench --n 20 --snr 5`
 n=20, 100 ms live operating point, intrusive metrics scored on the valid
 reference/output overlap at the known 975-sample output delay (3.98 s of each
 4 s pair; no padding scored) — measured 2026-09-08 with the current defaults
-(160 ms priming, 20 ms deferred tail, rollback off; **implemented and locally
-verified, not yet committed**): **SI-SDRi +4.05 dB**, **PESQ 1.24 → 1.45**,
-**STOI 0.83**, seg-SNR 5.1 dB, DNSMOS **SIG 3.12 / BAK 3.74 / OVRL 2.76**
-(non-intrusive, full output); RTF 0.23 with the DNSMOS/PESQ harness in-process,
-per-block p50 / p95 / p99 = 22.8 / 37.4 / 44.9 ms against the 100 ms budget,
-algorithmic latency 40 ms (20 ms STFT framing + the 20 ms deferred tail), peak
-RSS ~600 MB (harness-inclusive). Three repeated runs produced bit-identical
-output (sha256 prefix `3520b3eebd3fbfda`).
+(160 ms priming, 20 ms deferred tail, rollback off, speech cap 0.20):
+**SI-SDRi +4.12 dB**, **PESQ 1.24 → 1.55**, **STOI 0.83**, seg-SNR 5.1 dB,
+DNSMOS **SIG 3.14 / BAK 3.72 / OVRL 2.76** (non-intrusive, full output); RTF
+0.22 with the DNSMOS/PESQ harness in-process, per-block p50 / p95 / p99 =
+21.9 / 35.7 / 41.6 ms against the 100 ms budget, algorithmic latency 40 ms
+(20 ms STFT framing + the 20 ms deferred tail), peak RSS ~635 MB
+(harness-inclusive). Repeated runs produce bit-identical output (sha256 prefix
+`671689e8152daf07`).
 
 Like-for-like "before" (previous defaults — 80 ms priming, no tail, rollback
 on — identical clips and identical scoring): SI-SDRi +3.84 dB, PESQ 1.34,
@@ -209,6 +209,39 @@ Two personal recordings (a male and a female voice under plates/claps and car
 noise) served as **regression evidence** for these changes — both improved on
 all measured metrics except one flat SI-SDRi (0.13 → 0.12 on the second
 voice); they are not a representative evaluation set.
+
+**Female voices (fixed 2026-09-08).** Live testing with women speaking
+reported words clipped mid-way and a thin, distorted timbre while a male
+voice sounded good. Reproduced offline on a clean female recording at the
+same level: PESQ 3.00 vs 3.99 for the male voice, with 100–300 ms holes of
+30+ dB while the VAD read 1.0. Cause: per-block DFN3 with 160 ms of context
+sometimes judges creaky / low-centroid phrase endings (frequent in female
+speech) as low-frequency noise — one-shot DFN3 keeps every one of them — and
+the controller's "speech cap" was a constant 0.92 (a 93 dB attenuation cap)
+that let each misjudgement fall 30+ dB. Fix: the cap is now the config field
+meant for it, `supp_speech_floor` = 0.20 (≈ 30 dB while the VAD is
+confident). Measured on identical inputs: female clean PESQ 3.00 → 3.10
+(worst hole −34 → −28 dB), male 3.99 → 4.00; standard benchmark SI-SDRi
+4.05 → 4.12, PESQ 1.45 → 1.55, STOI 0.830 → 0.832; the two noisy personal
+recordings −0.045 / −0.02 PESQ with DNSMOS SIG/OVRL up; no compute cost. The
+value was set on the *noisy* recordings: a tighter cap helps a clean female
+voice more (0.10 → 3.24) but re-admits noise under speech when the noise is
+loud (0.10 → −0.25 PESQ on the plate recording). A speech-energy floor
+(`speech_floor_db`) that repairs the residual holes is implemented but **off
+by default** — it is purely positive on clean speech (holes −18 dB, +0.07)
+and net-negative on noisy material, because the dry block it blends back
+contains the burst that was just removed. Honest status: the female voice is
+improved, not equalised (3.10 vs 4.00 on clean speech); the rest of the gap
+is DFN3's own behaviour on this voice (one-shot 3.85 vs 4.26) plus the
+streaming context (see ARCHITECTURE.md).
+
+For a quiet demo room, or a machine with CPU headroom, two measured options
+can be set without touching code:
+
+```bash
+VOICEISO_CFG="speech_floor_db=9" python -m app.main            # clean-room hole repair (female 3.17)
+VOICEISO_CFG="speech_floor_db=9,dfn_history_ms=240" python -m app.main   # + more context (female 3.29, +9 % CPU)
+```
 
 Real-condition behaviour on held-out FSD50K eval clips
 ([Docs/REALWORLD_RESULTS.md](Docs/REALWORLD_RESULTS.md), regenerated 2026-09-08
@@ -264,6 +297,7 @@ python -m tests.test_phase_a        # classifier / config wiring (5)
 python -m tests.test_robustness     # live containment, NaN immunity, reset independence (5)
 python -m tests.test_deferred_tail  # deferred-tail timeline + metric alignment (13; fake DFN3
                                     # backend — no weights needed; 1 optional real-DFN3 test)
+python -m tests.test_speech_guard   # speech cap wiring + speech-energy floor (6; fake backend)
 ```
 
 Each runner is plain Python (prints PASS/SKIP/FAIL) and is also pytest-compatible.
