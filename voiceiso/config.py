@@ -79,15 +79,16 @@ class PipelineConfig:
     # block DFN3 judging creaky / low-centroid phrase endings (common in
     # female voices) as noise and dropping them 30+ dB while one-shot DFN3
     # keeps them.  0 disables the guard.
-    # OFF by default (measured 2026-09-08).  At 9 dB it repairs the clean
-    # female voice (worst hole −34 → −18 dB, PESQ +0.07, male untouched) but
-    # is net-negative on noisy material: when DFN3 removes a plate crash it
-    # removes the speech under it too, the wet genuinely falls below the
-    # speaker's level, and the only thing the guard can blend back is the dry
-    # block WITH the crash — noisy plate recording PESQ −0.16 / STOI −0.03,
-    # white-noise benchmark PESQ −0.03 / STOI −0.015.  Enable (e.g. 9.0) only
-    # for clean-room use; the speech cap above carries the default fix.
-    speech_floor_db: float = 0.0
+    # 9 dB by default since 2026-09-09.  Measured: repairs the clean female
+    # voice (worst hole −34 → −18 dB, PESQ +0.07, male untouched); on the
+    # noisy car recording it was the listener-preferred version (DNSMOS SIG
+    # 3.31 vs 3.26 cap-only) despite PESQ −0.07; on the plate recording it
+    # costs PESQ −0.16 / STOI −0.03 because when DFN3 removes a crash it also
+    # removes the speech under it and the only thing to blend back is the dry
+    # block WITH the crash; white-noise benchmark PESQ −0.03 / STOI −0.015.
+    # Chosen for the demo/normal-use case (voices in rooms without speech-level
+    # crashes).  Set 0 to disable.
+    speech_floor_db: float = 9.0
     speech_floor_vad: float = 0.9
 
     # ── Transient (clap / slam) kick — see DynamicController ─────────────

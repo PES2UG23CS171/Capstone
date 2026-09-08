@@ -159,7 +159,7 @@ def test_env_cfg_override():
         assert cfg.speech_floor_db == 9.0 and cfg.dfn_history_ms == 240.0 and cfg.kick_enabled is False
         assert cfg.supp_speech_floor == 0.20, "untouched fields keep their defaults"
         os.environ["VOICEISO_CFG"] = ""
-        assert PipelineConfig().speech_floor_db == 0.0, "empty override → defaults"
+        assert PipelineConfig().speech_floor_db == 9.0, "empty override → defaults"
     finally:
         if old is None:
             os.environ.pop("VOICEISO_CFG", None)

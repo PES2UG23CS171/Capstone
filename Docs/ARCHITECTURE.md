@@ -338,12 +338,14 @@ post-filter (DFN already preserves them, so it does **not** throttle the enhance
   low-centroid phrase ending (common in female voices) to be LF noise and drops
   it 30+ dB while one-shot DFN3 keeps it. A block counts as a dropout only if
   the wet is > floor below BOTH the dry and the speaker's recent wet level.
-  **OFF by default (`speech_floor_db=0`)**: on the clean female voice it
-  repairs the holes (−34 → −18 dB, PESQ +0.07, male untouched) but on noisy
-  material it is net-negative (plate recording PESQ −0.16 / STOI −0.03; white
-  noise PESQ −0.03) — when DFN3 removes a burst it removes the speech under it
-  too, and the only thing the guard can blend back is the dry block with the
-  burst. Enable with `VOICEISO_CFG=speech_floor_db=9` for a quiet room.
+  **ON by default at 9 dB (2026-09-09)** — a deliberate trade, chosen by
+  listening: it repairs the holes on the clean female voice (−34 → −18 dB,
+  PESQ +0.07, male untouched) and was the listener-preferred version on the
+  noisy car recording (DNSMOS SIG 3.31 vs 3.26), but when speech and a burst
+  overlap (plate recording) the only thing it can blend back is the dry block
+  with the burst — clearer speech, more audible noise (SIG +0.06, BAK −0.10,
+  PESQ −0.20; white noise PESQ −0.03). Disable with
+  `VOICEISO_CFG=speech_floor_db=0` for rooms with speech-level crashes.
 - **`process(ctx)`** —
   - **bypass** (passthrough dry, skip the net) when backend is passthrough **or**
     `suppression ≤ bypass_below` (controller says clean) — saves CPU;

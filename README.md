@@ -170,14 +170,15 @@ Synthetic +5 dB white-noise condition (`python -m voiceiso bench --n 20 --snr 5`
 n=20, 100 ms live operating point, intrusive metrics scored on the valid
 reference/output overlap at the known 975-sample output delay (3.98 s of each
 4 s pair; no padding scored) — measured 2026-09-08 with the current defaults
-(160 ms priming, 20 ms deferred tail, rollback off, speech cap 0.20):
-**SI-SDRi +4.12 dB**, **PESQ 1.24 → 1.55**, **STOI 0.83**, seg-SNR 5.1 dB,
-DNSMOS **SIG 3.14 / BAK 3.72 / OVRL 2.76** (non-intrusive, full output); RTF
-0.22 with the DNSMOS/PESQ harness in-process, per-block p50 / p95 / p99 =
-21.9 / 35.7 / 41.6 ms against the 100 ms budget, algorithmic latency 40 ms
-(20 ms STFT framing + the 20 ms deferred tail), peak RSS ~635 MB
+(160 ms priming, 20 ms deferred tail, rollback off, speech cap 0.20,
+speech-energy floor 9 dB): **SI-SDRi +4.13 dB**, **PESQ 1.24 → 1.51**,
+**STOI 0.82**, DNSMOS **SIG 3.15 / BAK 3.70 / OVRL 2.77** (non-intrusive, full
+output); RTF 0.22 with the DNSMOS/PESQ harness in-process, per-block p50 / p95
+/ p99 = 22.0 / 35.8 / 39.0 ms against the 100 ms budget, algorithmic latency
+40 ms (20 ms STFT framing + the 20 ms deferred tail), peak RSS ~625 MB
 (harness-inclusive). Repeated runs produce bit-identical output (sha256 prefix
-`671689e8152daf07`).
+`e5aa0ddcbfd26aca`). (Cap alone, floor off: SI-SDRi 4.12, PESQ 1.55, STOI
+0.83, BAK 3.72 — the floor costs 0.03 PESQ / 0.015 STOI on white noise.)
 
 Like-for-like "before" (previous defaults — 80 ms priming, no tail, rollback
 on — identical clips and identical scoring): SI-SDRi +3.84 dB, PESQ 1.34,
@@ -227,31 +228,35 @@ recordings −0.045 / −0.02 PESQ with DNSMOS SIG/OVRL up; no compute cost. The
 value was set on the *noisy* recordings: a tighter cap helps a clean female
 voice more (0.10 → 3.24) but re-admits noise under speech when the noise is
 loud (0.10 → −0.25 PESQ on the plate recording). A speech-energy floor
-(`speech_floor_db`) that repairs the residual holes is implemented but **off
-by default** — it is purely positive on clean speech (holes −18 dB, +0.07)
-and net-negative on noisy material, because the dry block it blends back
-contains the burst that was just removed. Honest status: the female voice is
-improved, not equalised (3.10 vs 4.00 on clean speech); the rest of the gap
-is DFN3's own behaviour on this voice (one-shot 3.85 vs 4.26) plus the
-streaming context (see ARCHITECTURE.md).
+(`speech_floor_db` = 9, **on by default since 2026-09-09**) repairs the
+residual holes: on the clean female voice it is purely positive (holes
+−18 dB, PESQ 3.10 → 3.17), and on the noisy car recording it was the
+listener-preferred version. Its trade: when speech and a loud burst overlap,
+the only thing it can blend back is the dry block with the burst, so on the
+plate recording speech gets clearer (DNSMOS SIG +0.06) while the noise under
+it is more audible (BAK −0.10, PESQ −0.20). Honest status: the female voice is
+improved, not equalised (3.17 vs 4.00 on clean speech); the rest of the gap is
+DFN3's own behaviour on this voice (one-shot 3.85 vs 4.26) plus the streaming
+context (see ARCHITECTURE.md).
 
-For a quiet demo room, or a machine with CPU headroom, two measured options
-can be set without touching code:
+Settable without touching code (`VOICEISO_CFG="key=value,..."`):
 
 ```bash
-VOICEISO_CFG="speech_floor_db=9" python -m app.main            # clean-room hole repair (female 3.17)
-VOICEISO_CFG="speech_floor_db=9,dfn_history_ms=240" python -m app.main   # + more context (female 3.29, +9 % CPU)
+VOICEISO_CFG="dfn_history_ms=240" python -m app.main   # more context: female 3.29, +9 % CPU
+VOICEISO_CFG="speech_floor_db=0" python -m app.main    # disable the repair in rooms with speech-level crashes
 ```
 
 Real-condition behaviour on held-out FSD50K eval clips
 ([Docs/REALWORLD_RESULTS.md](Docs/REALWORLD_RESULTS.md), regenerated 2026-09-08
 with the current defaults): silence-regime attenuation **fan +42 dB, clap
 +43 dB, traffic +42 dB, competing speech +31 dB, keyboard +28 dB, TV +14 dB**;
-during speech at 0 dB SNR, SI-SDRi from **+5.1 (TV) to +10.8 (keyboard)**.
-(Versus the sprint matrix: every speech-regime number rose 0.1–2.1 dB and
-fan/traffic/competing-speech silence attenuation rose 3–8 dB; TV silence
-attenuation fell 19 → 14 dB — DFN3 with fuller context treats loudspeaker
-speech more like speech — and clap silence 45 → 43 dB.)
+during speech at 0 dB SNR, SI-SDRi from **+5.2 (TV) to +10.9 (keyboard)**.
+(Versus the sprint matrix: speech-regime numbers rose 0.2–2.1 dB except
+traffic, and fan/traffic/competing-speech silence attenuation rose 3–8 dB; TV
+silence attenuation fell 19 → 14 dB — DFN3 with fuller context treats
+loudspeaker speech more like speech — and clap silence 45 → 43 dB. The
+speech-energy floor's known trade shows here too: traffic during speech
+6.9 → 6.0 dB at 0 dB SNR and 4.9 → 4.6 at 5 dB, the burst-under-speech case.)
 
 ### Classifier (`efficientat_head12_v3.onnx`, corrected protocol + window-robust)
 

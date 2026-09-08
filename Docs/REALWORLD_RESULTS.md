@@ -6,10 +6,10 @@ Full deployed pipeline, 100 ms blocks, real FSD50K **eval** clips (n=4/condition
 |---|---|---|---|---|
 | fan | +41.9 | +10.4 | +8.5 | +5.5 |
 | AC (→fan) | +41.9 | +10.4 | +8.5 | +5.5 |
-| keyboard | +27.6 | +10.8 | +8.8 | +5.3 |
-| mouse (→clicks) | +27.6 | +10.8 | +8.8 | +5.3 |
-| clap | +42.7 | +7.3 | +5.7 | +3.5 |
-| TV (loudspeaker) | +13.6 | +5.1 | +3.8 | +2.1 |
-| competing speech | +31.4 | +7.5 | +5.9 | +3.5 |
-| café (babble) | +31.4 | +7.5 | +5.9 | +3.5 |
-| traffic | +41.5 | +6.9 | +4.9 | +2.5 |
+| keyboard | +27.2 | +10.9 | +8.8 | +5.3 |
+| mouse (→clicks) | +27.2 | +10.9 | +8.8 | +5.3 |
+| clap | +42.7 | +7.2 | +5.6 | +3.5 |
+| TV (loudspeaker) | +13.6 | +5.2 | +3.8 | +2.0 |
+| competing speech | +31.3 | +7.3 | +5.9 | +3.5 |
+| café (babble) | +31.3 | +7.3 | +5.9 | +3.5 |
+| traffic | +41.5 | +6.0 | +4.6 | +2.3 |
