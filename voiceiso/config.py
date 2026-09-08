@@ -60,6 +60,14 @@ class PipelineConfig:
     supp_attack_ms: float = 30.0       # how fast aggressiveness ramps up
     supp_release_ms: float = 150.0     # how fast it ramps down (avoid pumping)
 
+    # ── Transient (clap / slam) kick — see DynamicController ─────────────
+    # Values are the shipped behaviour; exposed as fields so calibration runs
+    # against real recordings can vary them without editing the controller.
+    kick_enabled: bool = True
+    kick_crest_db: float = 18.0        # intra-block crest (max−min over 10 ms sub-frames)
+    kick_vad_max: float = 0.75         # confident speech (vad_prob ≥ this) vetoes the kick
+    kick_target: float = 0.85          # suppression forced for a kicked block
+
     # ── Post-filter / comfort noise ──────────────────────────────────────
     # Ceiling for injected comfort noise.  -65 dBFS was audible as a constant
     # "static air hiss" on headphones once real room noise was actually
@@ -119,6 +127,14 @@ class PipelineConfig:
 
     # ── Speech-quality protection (over-suppression rollback) ────────────
     artifact_band_drop_db: float = 25.0  # sub-band drop that flags over-suppression
+    # OFF by default (2026-09-08 measurement).  The rollback blends the DRY
+    # signal back in whenever its cues suspect over-suppression — and on real
+    # noise the cues fire on the noise itself, re-injecting what DFN3 removed.
+    # Disabling it improved EVERY metric on the standard +5 dB benchmark
+    # (n=20: SI-SDRi +3.85→+3.92, PESQ 1.34→1.37, DNSMOS BAK 2.61→3.69,
+    # OVRL 2.06→2.66), both real recordings (PESQ +0.09 / +0.05, STOI +0.01)
+    # and was invisible on clean speech.  Kept as a switch for future work.
+    artifact_rollback_enabled: bool = False
     artifact_rollback_mix: float = 0.30  # dry-blend fraction during rollback
     artifact_cap_relief_db: float = 12.0 # how much to relax next-frame atten cap
     # Multi-cue artifact-confidence fusion weights (sum ~ 1.0).
@@ -198,7 +214,22 @@ class PipelineConfig:
     # measured saturation point: 17.7 dB SI-SDR on speech @ 5 dB SNR / 100 ms
     # blocks (one-shot bound 18.0 dB; naive per-block stateful mode 11.5 dB),
     # at RTF ≈ 0.17.  160/240 ms measure no better.
-    dfn_history_ms: float = 80.0
+    # 160 ms (was 80) since 2026-09-08: DFN3's GRU state is not converged after
+    # 80 ms of priming — measured −15 dB error-to-signal in each block's first
+    # 5 ms and −25 dB mid-block vs one-shot processing.  160 ms: PESQ on clean
+    # speech 3.72→3.85 (one-shot 4.41), in noise 1.91→2.02; +~14 % DFN3
+    # compute.  240 ms buys only +0.02 PESQ more for +6 % — not taken.
+    dfn_history_ms: float = 160.0
+    # Deferred output tail: the last ``dfn_tail_ms`` of each block are emitted
+    # one call later, once DFN3 has real right context for them (its deep
+    # filter looks ~20 ms ahead; against pad=True's zero-padding the block's
+    # last frames come out degraded — measured −16 dB error-to-signal in the
+    # final 5 ms vs −25 dB mid-block).  Costs exactly this much extra latency
+    # and no compute.  0 keeps the zero-added-latency behaviour.
+    # 20 ms since 2026-09-08 (with 160 ms priming): standard +5 dB benchmark
+    # PESQ 1.37→1.42, DNSMOS OVRL 2.66→2.77; real recording PESQ 1.81→2.01,
+    # STOI 0.859→0.875; clean speech PESQ 3.55→3.96.  40 ms buys nothing more.
+    dfn_tail_ms: float = 20.0
 
     # ── Paths ────────────────────────────────────────────────────────────
     dfn_model_dir: Optional[str] = None  # None → DFN3 default bundled model
@@ -281,4 +312,4 @@ class PipelineConfig:
 
     @property
     def algorithmic_latency_ms(self) -> float:
-        return self.hop_ms + (self.win_ms - self.hop_ms) + self.lookahead_ms
+        return self.hop_ms + (self.win_ms - self.hop_ms) + self.lookahead_ms + self.dfn_tail_ms

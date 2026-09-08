@@ -45,6 +45,9 @@ checkpoints/sig_bak_ovr.onnx
 # Personal working notes — not part of the deliverable
 Brief.rtf
 
+# Personal test recordings + derived ground-truth pairs (scripts/ground_truth_eval.py) — never public
+Personal Test/
+
 # Presentation source material (slide decks, panel photos, drafts, PDFs) —
 # kept locally for prep; the public repo ships only the written engineering
 # reports already tracked directly under Docs/ (ARCHITECTURE.md,

@@ -36,7 +36,7 @@ from scipy.signal import resample_poly
 from voiceiso.config import PipelineConfig
 from voiceiso.pipeline import StreamingPipeline
 from voiceiso.bench import metrics as M
-from voiceiso.bench.benchmark import _align_to_ref
+from voiceiso.bench.benchmark import estimate_lag, overlap_slices, resolve_lag, valid_overlap
 from voiceiso.data.fsd50k_labelmap import fsd50k_labels_to_target
 
 SR = 48_000
@@ -116,12 +116,16 @@ def main() -> int:
         from scripts.train_head_v4 import loudspeaker_sim
 
     pipe = StreamingPipeline(PipelineConfig())
+    D = pipe.output_delay_samples          # known constant delay (deferred tail + FIR)
+    rejected = 0
     lines = ["# Real-world condition matrix",
              "",
              "Full deployed pipeline, 100 ms blocks, real FSD50K **eval** clips "
              f"(n={N_CLIPS}/condition, held out from all training). "
              "Silence regime: noise attenuation (dB, higher = better). "
-             "Speech regime: SI-SDRi at the given input SNR (dB, higher = better).",
+             "Speech regime: SI-SDRi at the given input SNR (dB, higher = better). "
+             "All intrusive numbers are scored on the valid reference/output overlap "
+             f"only (pipeline output delay {D} samples; no zero padding is scored).",
              "",
              "| condition | silence: atten (dB) | " +
              " | ".join(f"speech @{int(s)} dB: SI-SDRi" for s in SNRS) + " |",
@@ -148,17 +152,25 @@ def main() -> int:
             noise = x * (0.05 / (np.sqrt((x ** 2).mean()) + 1e-9))
             # silence regime
             out = stream(pipe, noise)
-            al, _ = _align_to_ref(noise, out)
-            att_sil.append(rms_db(noise[SR:]) - rms_db(al[SR:]))
+            # Silence regime: nothing speech-like to correlate, so use the
+            # KNOWN pipeline delay and score the valid overlap only.
+            nseg, oseg = valid_overlap(noise, out, D)
+            att_sil.append(rms_db(nseg[SR:]) - rms_db(oseg[SR:]))
             # speech regime at each SNR
             for snr in SNRS:
                 g = (np.sqrt((speech ** 2).mean())
                      / (np.sqrt((noise ** 2).mean()) * 10 ** (snr / 20)))
                 mix = (speech + g * noise[: len(speech)]).astype("float32")
                 outm = stream(pipe, mix)
-                alm, _ = _align_to_ref(mix, outm)
-                si_in = M.si_sdr(speech, mix)
-                si_out = M.si_sdr(speech[: len(alm)], alm)
+                al = resolve_lag(estimate_lag(mix, outm), D)   # exact known delay, estimate cross-checks
+                if not al.ok:
+                    rejected += 1          # ambiguous / inconsistent alignment → not scored
+                    continue
+                s_ref, _ = overlap_slices(len(mix), al.lag)
+                sseg = speech[s_ref]
+                mseg, oseg = valid_overlap(mix, outm, al.lag)
+                si_in = M.si_sdr(sseg, mseg)
+                si_out = M.si_sdr(sseg, oseg)
                 sisdri[snr].append(si_out - si_in)
 
         row = (f"| {name} | {np.mean(att_sil):+.1f} | " +
@@ -166,9 +178,12 @@ def main() -> int:
         lines.append(row)
         print(row, flush=True)
 
+    if rejected:
+        lines += ["", f"_{rejected} speech-regime clip(s) excluded: alignment rejected "
+                      "(ambiguous or inconsistent with the known pipeline delay)._"]
     text = "\n".join(lines) + "\n"
     Path(args.out).write_text(text)
-    print(f"\nwrote {args.out}")
+    print(f"\nwrote {args.out}  (rejected clips: {rejected})")
     return 0
 
 

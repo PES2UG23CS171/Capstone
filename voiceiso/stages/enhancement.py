@@ -211,6 +211,7 @@ class Enhancement(Stage):
         # updated on every block (bypass included) so an active block after a
         # bypass stretch still gets true left context.
         self._hist_len = 0
+        self._tail = 0
         self._hist = np.zeros(0, dtype=np.float32)
         self._DFState = None
         self._fft = 960
@@ -244,10 +245,16 @@ class Enhancement(Stage):
             self._hop = int(state0.hop_size())
             # Round history to whole hops so the kept region starts on a frame.
             hist_ms = float(getattr(cfg, "dfn_history_ms", 80.0))
-            self._hist_len = int(round(self.sr * hist_ms / 1000.0 / self._hop)) * self._hop
+            tail_ms = float(getattr(cfg, "dfn_tail_ms", 0.0))
+            prime = int(round(self.sr * hist_ms / 1000.0 / self._hop)) * self._hop
+            self._tail = int(round(self.sr * tail_ms / 1000.0 / self._hop)) * self._hop
+            # The history must cover priming AND the deferred tail, so the
+            # first sample we emit still sees ``dfn_history_ms`` of real left
+            # context (the emitted window starts ``_tail`` samples earlier).
+            self._hist_len = prime + self._tail
             self._hist = np.zeros(self._hist_len, dtype=np.float32)
-            logger.info("enhancement: DeepFilterNet3 loaded (threads=%d, history=%d ms)",
-                        threads, int(1000 * self._hist_len / self.sr))
+            logger.info("enhancement: DeepFilterNet3 loaded (threads=%d, priming=%d ms, tail=%d ms)",
+                        threads, int(1000 * prime / self.sr), int(1000 * self._tail / self.sr))
         else:
             # Make the no-op state LOUD: a passthrough enhancer means the whole
             # product is doing nothing, which must never look like success.
@@ -273,6 +280,13 @@ class Enhancement(Stage):
         self._cap_relief_db = 0.0
         self._hist = np.zeros(self._hist_len, dtype=np.float32)
 
+    @property
+    def output_delay_samples(self) -> int:
+        """Constant delay this stage adds to the output timeline: the deferred
+        tail (960 samples for ``dfn_tail_ms=20`` @ 48 kHz; 0 for the
+        passthrough backend or ``dfn_tail_ms=0``)."""
+        return int(self._tail)
+
     def warmup(self) -> None:
         """Run DFN3 once so torch first-call costs don't hit the live stream.
 
@@ -297,15 +311,32 @@ class Enhancement(Stage):
         else:
             self._hist = np.concatenate([self._hist[len(x):], x.astype(np.float32)])
 
+    def _delayed_dry(self, x: np.ndarray) -> np.ndarray:
+        """``x`` delayed by the deferred tail, taken from the raw history.
+
+        Call BEFORE ``_push_hist``.  Identity when the tail is zero.  Used so
+        the bypass path and the dry copy kept for artifact analysis sit on
+        the same timeline as the (tail-delayed) wet output.
+        """
+        t = self._tail
+        if t <= 0 or self._hist_len <= 0:
+            return x
+        seg = np.concatenate([self._hist, x.astype(np.float32, copy=False)])
+        return seg[len(seg) - t - len(x): len(seg) - t].astype(np.float32, copy=True)
+
     def _enhance(self, buf: np.ndarray, atten_lim_db: float) -> np.ndarray:
-        """Enhance one block with real left context and zero added latency.
+        """Enhance one block with real left context (+ optional deferred tail).
 
         Runs ``enhance(pad=True)`` on ``[hist | buf]`` with a FRESH DfState
         (so nothing fabricated ever enters a persistent stream state), then
-        keeps only ``buf``'s region.  pad=True's internal trim keeps the
-        output input-aligned, so the kept region is exactly ``buf``'s
-        timeline.  NOTE: ``self._hist`` still holds the audio *preceding*
-        ``buf`` at this point — process() pushes the block only afterwards.
+        keeps ``buf``'s region shifted back by ``_tail`` samples: the block's
+        last ``_tail`` samples are NOT emitted yet (DFN3 looks ~20 ms ahead,
+        and against pad=True's zero-padding those frames come out degraded);
+        they are emitted by the next call, once they have real right context.
+        With ``_tail == 0`` the kept region is exactly ``buf``'s timeline
+        (zero added latency).  NOTE: ``self._hist`` still holds the audio
+        *preceding* ``buf`` at this point — process() pushes the block only
+        afterwards.
         """
         seg = np.concatenate([self._hist, buf.astype(np.float32, copy=False)])
         state = self._DFState(sr=self.sr, fft_size=self._fft,
@@ -317,7 +348,8 @@ class Enhancement(Stage):
         h = self._hist_len
         if len(out) < h + len(buf):
             out = np.concatenate([out, np.zeros(h + len(buf) - len(out), dtype="float32")])
-        return out[h: h + len(buf)]
+        t = self._tail
+        return out[h - t: h - t + len(buf)]
 
     def process(self, ctx: FrameContext) -> FrameContext:
         if self.backend == "passthrough":
@@ -329,13 +361,14 @@ class Enhancement(Stage):
         supp = float(np.clip(ctx.suppression, 0.0, 1.0))
         if supp <= self.bypass_below:
             # Keep the context history warm even when bypassing, so the next
-            # active block gets true left context.
+            # active block gets true left context — and emit the dry signal
+            # with the SAME deferred-tail delay as the wet path, so toggling
+            # between bypass and DFN3 never splices the timeline.
+            delayed = self._delayed_dry(dry)
             self._push_hist(dry)
+            ctx.audio = delayed
             ctx.meta["enh_wet"] = 0.0
             return ctx
-
-        # Only stash dry for rollback when we're actually about to run DFN3.
-        ctx.dry_audio = dry.copy()
 
         # Map suppression → DFN attenuation cap (gentle 12 dB … aggressive 100 dB).
         # Self-managed cap relief from any recent over-suppression event.
@@ -351,7 +384,11 @@ class Enhancement(Stage):
         # region is sample-aligned with ``dry``.  _enhance reads self._hist,
         # so push the block into the history only AFTER enhancing.
         wet = self._enhance(dry, atten_lim_db)
+        dry_delayed = self._delayed_dry(dry)      # same timeline as ``wet``
         self._push_hist(dry)
+        dry = dry_delayed
+        # Dry copy for artifact analysis / rollback — on the wet timeline.
+        ctx.dry_audio = dry.copy()
 
         # ── Multi-cue artifact confidence + per-band rollback ──────────
         # Gating preconditions:
@@ -419,7 +456,8 @@ class Enhancement(Stage):
             ctx.meta["enh_formant_score"] = formant_score
             ctx.meta["enh_energy_score"] = energy_score
 
-            if artifact_conf >= self.cfg.artifact_conf_threshold:
+            if (self.cfg.artifact_rollback_enabled
+                    and artifact_conf >= self.cfg.artifact_conf_threshold):
                 overshoot = 1.0
                 # When DFN3's mask is UNCERTAIN (low confidence) yet speech_conf
                 # is HIGH, the rollback should be MORE conservative: DFN3 may

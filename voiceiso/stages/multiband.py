@@ -83,6 +83,12 @@ class MultiBandGainModulator(Stage):
         self._delay_buf[:] = 0.0
         self._g_prev[:] = 1.0
 
+    @property
+    def output_delay_samples(self) -> int:
+        """Constant FIR group delay of the always-on filterbank (15 samples
+        for the default 31 taps)."""
+        return int(self._group_delay)
+
     def _delay(self, x: np.ndarray) -> np.ndarray:
         """Delay ``x`` by ``self._group_delay`` samples with state across blocks."""
         d = self._group_delay

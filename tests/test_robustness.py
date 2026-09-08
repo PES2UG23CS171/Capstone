@@ -88,14 +88,50 @@ def test_warmup_primes_pipeline():
 
 
 # ── HOSTILE-1: non-finite input must not poison persistent state ─────────────
+def _speech_like(seconds: float, sr: int = 48_000) -> np.ndarray:
+    """A signal the pipeline must PASS: real clean speech from
+    dataset/test/clean when present, else a synthetic harmonic 'vowel' with a
+    4 Hz amplitude modulation.  (White noise is the wrong stimulus here — a
+    denoiser fed pure noise is *supposed* to output near-silence.)"""
+    import glob
+    n = int(seconds * sr)
+    files = sorted(glob.glob("dataset/test/clean/*.wav"))
+    if files:
+        try:
+            import soundfile as sf
+            from math import gcd
+            from scipy.signal import resample_poly
+            x, fs = sf.read(files[0], dtype="float32", always_2d=True)
+            x = x.mean(axis=1)
+            if fs != sr:
+                g = gcd(fs, sr)
+                x = resample_poly(x, sr // g, fs // g).astype(np.float32)
+            if len(x) < n:
+                x = np.tile(x, int(np.ceil(n / len(x))))
+            x = x[:n]
+            return (0.1 * x / (np.sqrt(np.mean(x ** 2)) + 1e-9)).astype(np.float32)
+        except Exception:
+            pass
+    t = np.arange(n) / sr
+    x = sum(np.sin(2 * np.pi * 150.0 * k * t) / k for k in range(1, 12))
+    x *= 0.5 * (1.0 + np.sin(2 * np.pi * 4.0 * t))
+    return (0.1 * x / np.sqrt(np.mean(x ** 2))).astype(np.float32)
+
+
 def test_nan_input_does_not_kill_pipeline():
     """One NaN/Inf input sample used to poison every stage's recursive state:
     output went to permanent digital zeros with NO exception, so the live
     containment (dry-on-exception) could never fire.  The input-side guard
-    must sanitise and the pipeline must keep producing live audio after."""
+    must sanitise and the pipeline must keep producing live audio after.
+
+    The invariant is RELATIVE: the level after the event must stay within
+    12 dB of the level before it, on a speech-like stimulus.  (An earlier
+    version fed white noise and asserted an absolute floor; that only passed
+    while the artifact rollback blended raw noise back in — with rollback
+    off the pipeline correctly suppresses white noise to ~-73 dBFS, which
+    is not 'dead'.)"""
     pipe = _mk_pipeline()
-    rng = np.random.default_rng(3)
-    speech = (0.1 * rng.standard_normal(48_000 * 4)).astype(np.float32)
+    speech = _speech_like(4.0)
     levels = []
     for i in range(40):
         blk = speech[i * 4800:(i + 1) * 4800].copy()
@@ -106,8 +142,11 @@ def test_nan_input_does_not_kill_pipeline():
         out = pipe.process_block(blk).audio
         assert np.all(np.isfinite(out))
         levels.append(20 * np.log10(float(np.sqrt(np.mean(out ** 2))) + 1e-12))
-    assert max(levels[25:]) > -60.0, (
-        f"pipeline dead after non-finite input (tail max {max(levels[25:]):.1f} dBFS)")
+    before = max(levels[3:10])
+    after = max(levels[25:])
+    assert after > before - 12.0, (
+        f"pipeline dead after non-finite input (before {before:.1f} dBFS, "
+        f"after {after:.1f} dBFS)")
 
 
 # ── R9: reset() must give cross-pair independence (benchmark validity) ───────

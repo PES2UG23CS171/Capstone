@@ -235,8 +235,9 @@ class DynamicController(Stage):
         # and a quiet slice; steady speech/noise mixtures have neither.
         crest_db = float(np.max(sub_db) - np.min(sub_db))
         transient_kick = (
-            crest_db >= 18.0
-            and ctx.vad_prob < 0.75    # only CONFIDENT speech vetoes the kick
+            cfg.kick_enabled
+            and crest_db >= cfg.kick_crest_db
+            and ctx.vad_prob < cfg.kick_vad_max   # only CONFIDENT speech vetoes the kick
                                        # (claps tickle Silero ≤~0.5; a false
                                        # kick on an unvoiced onset in a quiet
                                        # room is fail-safe — DFN3 on clean
@@ -268,7 +269,7 @@ class DynamicController(Stage):
 
         target = self._compute_target(ctx)
         if transient_kick:
-            target = max(target, 0.85)
+            target = max(target, cfg.kick_target)
 
         # ── Attack / per-class release smoothing (time-constant in ms) ───
         release_ms = _CLASS_RELEASE_MS.get(ctx.noise_class, cfg.supp_release_ms)

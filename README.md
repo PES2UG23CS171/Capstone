@@ -69,10 +69,22 @@ Then (either path):
 - **App:** `./run.sh`, set *Output device* → `BlackHole 2ch`
 
 …and in **Google Meet → Settings → Audio → Microphone**, select
-**BlackHole 2ch**. The far side now receives the processed audio. Your real
-mic stays selected inside VoiceISO; Meet's own noise cancellation should be
-turned OFF to demo ours. `python -m voiceiso devices` lists devices and flags
+**BlackHole 2ch** (Speakers must stay on real headphones/speakers, never
+BlackHole). The far side now receives the processed audio. Your real mic
+stays selected inside VoiceISO; Meet's own **Noise cancellation** and
+**Studio sound** (its AI mic enhancer) must both be turned OFF to demo ours —
+with either on, the far side can't tell whose cleaning it is hearing. `python -m voiceiso devices` lists devices and flags
 usable call-mode sinks.
+
+> **Use a Chromium browser for the call (Chrome / Brave / Edge) — not
+> Safari.** Safari routes call audio through Apple's voice-processing unit,
+> which fails silently with virtual devices: with BlackHole selected as the
+> microphone, Safari's call audio dies in *both* directions, while the same
+> call works with the built-in mic. Chromium browsers use their own audio
+> stack and work with BlackHole as expected. (Diagnosed live 2026-09-08:
+> VoiceISO's output was verified at normal speech level inside BlackHole and
+> Safari had BlackHole open as its input — the break was inside Safari.)
+> Also quit other apps holding the microphone (e.g. GarageBand) before a demo.
 
 Notes: you will not hear yourself locally in this mode (normal for calls —
 the far end hears the clean stream); mouth-to-ear adds ~200–300 ms, fine for
@@ -123,25 +135,90 @@ python -m voiceiso bench --n 20 --snr 5           # add --block-ms 20 for the lo
 # Classifier: retrain on dev (uploader-grouped) + evaluate on held-out eval:
 python -m scripts.retrain_head_dev               # train v2 + full eval report
 python -m scripts.retrain_head_dev --eval-only   # just the eval table
+
+# Real-noise condition matrix (FSD50K eval clips) → Docs/REALWORLD_RESULTS.md:
+python -m scripts.realworld_matrix
+
+# Ground truth on YOUR OWN clean / noisy recording pairs (any format afconvert reads):
+python -m scripts.ground_truth_eval prep --noisy "Personal Test/audio demo.m4a" \
+    --clean "Personal Test/pes jargon.m4a" --tag jargon
+python -m scripts.ground_truth_eval run --tag jargon --name defaults
+python -m scripts.ground_truth_eval run --tag jargon --name previous \
+    --cfg dfn_history_ms=80 --cfg dfn_tail_ms=0 --cfg artifact_rollback_enabled=True
 ```
 
 > Without real noise corpora under `--data`, `bench` falls back to a **synthetic
 > white-noise** condition and says so loudly — those numbers are not comparable to
 > real-corpora results.
 
-### Headline results (final sprint)
+> **How intrusive metrics are scored.** The pipeline's output is delayed by a
+> constant, known 975 samples (20 ms deferred DFN3 tail + 15-sample FIR group
+> delay; `StreamingPipeline.output_delay_samples`). SI-SDR, seg-SNR,
+> correlation, PESQ and STOI are computed **only on the valid overlap** of
+> reference and output at that delay — never against zero padding — and the
+> cross-correlation estimate cross-checks it, **rejecting** a pair whose
+> alignment is impossible or ambiguous instead of scoring it. DNSMOS is
+> non-intrusive and uses the full output. The report states three criteria
+> separately: the **Phase-2 project objective** (SI-SDRi ≥ 4.0 dB @ 5 dB SNR —
+> the release-gating one), the **aspirational Krisp-parity targets** from the
+> June redesign (SI-SDRi ≥ 10 dB etc. — informational), and the **real-time
+> budget** (RTF ≤ 0.5). It never prints "PASS".
 
-Synthetic +5 dB condition, n=20, 100 ms live operating point, output
-time-aligned before scoring: **SI-SDRi +5.0 dB**, PESQ 1.24 → 1.36, STOI 0.79,
-DNSMOS SIG 2.94 / BAK 3.00 / OVRL 2.24, RTF 0.38 (0.47 with the DNSMOS/PESQ
-harness in-process), per-block p99 66 ms vs the 100 ms budget, peak RSS
-~560 MB (harness-inclusive).
+### Headline results
+
+Synthetic +5 dB white-noise condition (`python -m voiceiso bench --n 20 --snr 5`),
+n=20, 100 ms live operating point, intrusive metrics scored on the valid
+reference/output overlap at the known 975-sample output delay (3.98 s of each
+4 s pair; no padding scored) — measured 2026-09-08 with the current defaults
+(160 ms priming, 20 ms deferred tail, rollback off; **implemented and locally
+verified, not yet committed**): **SI-SDRi +4.05 dB**, **PESQ 1.24 → 1.45**,
+**STOI 0.83**, seg-SNR 5.1 dB, DNSMOS **SIG 3.12 / BAK 3.74 / OVRL 2.76**
+(non-intrusive, full output); RTF 0.23 with the DNSMOS/PESQ harness in-process,
+per-block p50 / p95 / p99 = 22.8 / 37.4 / 44.9 ms against the 100 ms budget,
+algorithmic latency 40 ms (20 ms STFT framing + the 20 ms deferred tail), peak
+RSS ~600 MB (harness-inclusive). Three repeated runs produced bit-identical
+output (sha256 prefix `3520b3eebd3fbfda`).
+
+Like-for-like "before" (previous defaults — 80 ms priming, no tail, rollback
+on — identical clips and identical scoring): SI-SDRi +3.84 dB, PESQ 1.34,
+STOI 0.79, DNSMOS SIG 2.92 / BAK 2.64 / OVRL 2.08. The new defaults improved
+all measured metrics on the evaluated sets, for ≈ +15 % compute (RTF 0.19 →
+0.23 under identical conditions) and +20 ms of latency. The four latency
+figures in this project are different things: the **20 ms deferred tail**
+(the only lookahead), the **40 ms algorithmic latency** (tail + STFT framing),
+the **100 ms frame accumulation** of the live paths, and the **≈ 200–300 ms
+mouth-to-ear on a call** (block fill + queue hop + device I/O).
+
+Criteria, stated separately: the **Phase-2 project objective** (SI-SDRi
+≥ 4.0 dB @ 5 dB SNR) is met on this synthetic condition (+4.05; the previous
+defaults were below it at +3.84) and on five of six real-noise conditions
+(below; not TV); the **aspirational Krisp-parity target** (SI-SDRi ≥ 10 dB,
+from the June redesign) is not met and never has been; the **real-time
+budget** (RTF ≤ 0.5) is met. Synthetic white-noise and real-noise numbers are
+different conditions and are never quoted against each other.
+
+History of the headline, because it matters: the July sprint reported
+**SI-SDRi +5.0 dB** (PESQ 1.36, OVRL 2.24, BAK 3.00), and that run reproduces
+exactly on today's clips. The next DSP commit caged the transient kick after
+real listening revealed onset distortion; the pre-cage kick had been firing on
+every speech onset over white noise — forcing DFN3 to full strength on exactly
+this benchmark — and the cage cost 1.15 dB of SI-SDRi that was never
+re-measured. Re-tested on ground-truth recordings: an eager kick recovers
++5.5 dB here but costs clean-speech PESQ 3.96 → 3.84, so the cage stays.
+Two personal recordings (a male and a female voice under plates/claps and car
+noise) served as **regression evidence** for these changes — both improved on
+all measured metrics except one flat SI-SDRi (0.13 → 0.12 on the second
+voice); they are not a representative evaluation set.
 
 Real-condition behaviour on held-out FSD50K eval clips
-([Docs/REALWORLD_RESULTS.md](Docs/REALWORLD_RESULTS.md)): silence-regime attenuation
-**fan +38 dB, clap +45 dB, traffic +38 dB, keyboard +27 dB, TV +19 dB,
-competing speech +23 dB**; during speech at 0 dB SNR, SI-SDRi from **+4.1
-(TV) to +10.2 (keyboard)**.
+([Docs/REALWORLD_RESULTS.md](Docs/REALWORLD_RESULTS.md), regenerated 2026-09-08
+with the current defaults): silence-regime attenuation **fan +42 dB, clap
++43 dB, traffic +42 dB, competing speech +31 dB, keyboard +28 dB, TV +14 dB**;
+during speech at 0 dB SNR, SI-SDRi from **+5.1 (TV) to +10.8 (keyboard)**.
+(Versus the sprint matrix: every speech-regime number rose 0.1–2.1 dB and
+fan/traffic/competing-speech silence attenuation rose 3–8 dB; TV silence
+attenuation fell 19 → 14 dB — DFN3 with fuller context treats loudspeaker
+speech more like speech — and clap silence 45 → 43 dB.)
 
 ### Classifier (`efficientat_head12_v3.onnx`, corrected protocol + window-robust)
 
@@ -183,8 +260,19 @@ speaker.
 ## Tests
 
 ```bash
-python -m tests.test_phase_a        # plain python (prints PASS/SKIP), or `pytest`
+python -m tests.test_phase_a        # classifier / config wiring (5)
+python -m tests.test_robustness     # live containment, NaN immunity, reset independence (5)
+python -m tests.test_deferred_tail  # deferred-tail timeline + metric alignment (13; fake DFN3
+                                    # backend — no weights needed; 1 optional real-DFN3 test)
 ```
+
+Each runner is plain Python (prints PASS/SKIP/FAIL) and is also pytest-compatible.
+`test_deferred_tail` pins: 20 ms tail = exactly 960 samples; tail 0 reproduces the
+previous behaviour; bypass and DFN3-active blocks share one timeline; transitions
+never splice; reset clears history and tail state; partial blocks; offline flush
+recovers the tail; scoring never compares padding; known delays ±960 / +15 are
+estimated exactly and impossible alignments are rejected; SI-SDR identity and
+scale invariance; bit-identical repeated runs.
 
 ## Known limitations
 
@@ -192,3 +280,16 @@ python -m tests.test_phase_a        # plain python (prints PASS/SKIP), or `pytes
   scaffolded (passthrough) until models are provided.
 - AEC is implemented but off by default (needs a far-end reference signal).
 - No INT8 model ships; the ONNX export is FP32.
+- **Extremely loud plate/crockery crashes and continuous clatter that overlap
+  speech at ~0 dB local SNR are not removed** (measured 0.2–0.3 dB cut on the
+  team's own recording): DFN3 treats the ringing, tonal impulses as
+  speech-like. Hand-claps overlapping speech are cut ~12 dB; impulses in
+  silence 30–50 dB. A sub-frame limiter was built for this case, measured
+  inert, and removed — it is a limitation of the frozen architecture.
+- Loudspeaker/TV speech is the weakest real-noise condition (silence-regime
+  attenuation 14 dB; speech-regime SI-SDRi +3.8 dB at 5 dB SNR, below the
+  4 dB objective) — see the opt-in v4 head above.
+- Offline `process_signal()` / `voiceiso enhance` flush the 20 ms deferred DFN3
+  tail at end-of-file against fabricated (zero) right context, so the final
+  20 ms of an offline file have the pre-tail design's quality; live streams
+  never do this.

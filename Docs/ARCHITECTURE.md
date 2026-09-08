@@ -7,9 +7,10 @@
 > controller, speech preservation, and a residual post-filter.
 >
 > **Version 2** (current): 100 ms blocks on a dedicated DSP worker thread
-> (xrun-safe callback), history-primed per-call DFN3 (80 ms of real left
-> context re-enhanced each call — no cross-call GRU state is possible with
-> DFN3's stateless-GRU invocation), graduated suppression controller, and an
+> (xrun-safe callback), history-primed per-call DFN3 (160 ms of real left
+> context re-enhanced each call plus a 20 ms deferred output tail — no
+> cross-call GRU state is possible with DFN3's stateless-GRU invocation),
+> graduated suppression controller, and an
 > EWMA-smoothed learned noise classifier.  End-to-end mouth-to-ear latency
 > ≈ 200–300 ms (block fill + one queue hop + device I/O).
 
@@ -26,7 +27,11 @@ Four principles, each forced on us by measurement or architectural critique:
    ≈ 0.99 and gives +16 dB SNR. An early "speech-protection" design blended the
    *noisy dry* signal back in and collapsed SNR from +14 → +3 dB. The corrected
    rule: **never blend noise back; output is fully wet.** Speech is protected by
-   *limiting how much DFN attenuates*, not by mixing in noise.
+   *limiting how much DFN attenuates*, not by mixing in noise. (The later
+   4-cue "artifact rollback" re-learned this the hard way: it blended 30 %
+   dry back whenever its cues fired, the cues fire on the noise itself, and
+   it measured net-negative on the benchmark and on real recordings —
+   disabled by default 2026-09-08, see §9.)
 2. **Be cheap where being wrong is cheap.** Per-class noise nuance and gentleness
    drive the **post-filter** (residual cleanup in gaps), never the network's core
    strength — a misclassification there is inaudible instead of leaking noise.
@@ -42,10 +47,14 @@ Four principles, each forced on us by measurement or architectural critique:
    don't have. Practical consequence: larger blocks give DFN3 more context —
    ALL paths (benchmark, `voiceiso live`, desktop app, offline `enhance`) use
    100 ms blocks, and the enhancement stage additionally re-enhances the last
-   80 ms of real input with each block (history-primed per-call processing,
-   fresh DfState per call) so every emitted frame has warm GRU/conv context.
-   Measured on speech @ 5 dB SNR: 17.7 dB SI-SDR vs 11.5 dB for naive
-   per-block stateful mode (one-shot bound 18.0 dB).
+   160 ms of real input with each block (history-primed per-call processing,
+   fresh DfState per call) and defers each block's last 20 ms to the next
+   call, so every emitted sample has warm GRU/conv context on the left AND
+   DFN3's ~20 ms lookahead on the right. Measured on speech @ 5 dB SNR:
+   17.7 dB SI-SDR vs 11.5 dB for naive per-block stateful mode (one-shot
+   bound 18.0 dB) — but SI-SDR is blind to block-boundary artifacts: on CLEAN
+   speech, PESQ was 3.72 with 80 ms priming and no tail vs one-shot 4.41, and
+   160 ms + 20 ms tail recovers it to 4.01 (2026-09-08, §9).
 
 ---
 
@@ -76,7 +85,7 @@ Four principles, each forced on us by measurement or architectural critique:
  SpeechPreservation detect consonants → protect from the post-filter
    │
    ▼
- Enhancement (DFN3) history-primed per-call (80 ms real context); controller-steered; bypass-when-clean
+ Enhancement (DFN3) history-primed per-call (160 ms real context + 20 ms deferred tail); controller-steered; bypass-when-clean
    │
    ▼
  PostFilter         residual gate in gaps + comfort-noise injection
@@ -86,8 +95,8 @@ Four principles, each forced on us by measurement or architectural critique:
 ```
 
 Every box is a `Stage` that reads/annotates a shared `FrameContext` and keeps its
-own streaming state across blocks. Measured RTF ≈ 0.17 when DFN3 is active
-(100 ms blocks + 80 ms history). End-to-end latency budget: 100 ms block fill
+own streaming state across blocks. Measured RTF ≈ 0.24 when DFN3 is active
+(100 ms blocks + 160 ms priming + 20 ms tail). End-to-end latency budget: 100 ms block fill
 + one queue hop (≤ 100 ms) + device I/O — ≈ 200–300 ms mouth-to-ear.
 
 ---
@@ -154,9 +163,17 @@ operation.
 | `aec_filter_ms` | 200 | AEC adaptive-filter tail length |
 
 **Properties** (derived): `hop`, `win`, `lookahead` (samples); `algorithmic_latency_ms`
-= `hop_ms + (win_ms − hop_ms) + lookahead_ms` = 20 ms — STFT-framing latency only.
-It deliberately EXCLUDES the dominant real-world terms: the 100 ms block fill,
-the worker-queue hop, and device I/O. End-to-end mouth-to-ear ≈ 200–300 ms.
+= `hop_ms + (win_ms − hop_ms) + lookahead_ms + dfn_tail_ms` = 20 ms of STFT framing
++ the 20 ms deferred DFN3 tail = 40 ms.  Four different latency numbers are used
+in this project and must not be confused: (1) the **20 ms deferred tail** — the
+only lookahead, added 2026-09-08; (2) **algorithmic latency 40 ms** — tail +
+STFT framing; (3) **100 ms frame accumulation** — the block the live paths
+process; (4) **≈ 200–300 ms mouth-to-ear on a call** — block fill + one
+worker-queue hop + device I/O (the tail adds its 20 ms to the previous
+≈ 200–300 ms figure; it is not separately measurable on a call).
+`StreamingPipeline.output_delay_samples` reports the constant output delay
+(975 samples = tail + 15-sample FIR group delay) that the offline helper
+removes and the benchmark scores at.
 
 ### `voiceiso/stages/base.py`
 
@@ -300,20 +317,29 @@ post-filter (DFN already preserves them, so it does **not** throttle the enhance
 
 ### 5.8 `Enhancement` (`stages/enhancement.py`) — the DFN3 core
 
-`Enhancement(cfg, threads=4, context_ms=200.0, bypass_below=0.08)`
+`Enhancement(cfg, threads=4, bypass_below=0.08)`
 - **`__init__`** — imports `voiceiso._compat` first (torchaudio shim), then
   `init_df(...)` to load DeepFilterNet3; `backend` ∈ {`deepfilternet3`,`passthrough`}.
-- **`_enhance(buf, atten_lim_db)`** — runs DFN's `enhance()` on a buffer with the given
-  attenuation cap, returns float32 clamped to input length.
+  The raw-input history buffer covers `dfn_history_ms` (160) **+** `dfn_tail_ms`
+  (20), both rounded to whole STFT hops.
+- **`_enhance(buf, atten_lim_db)`** — runs DFN's `enhance()` on `[history | buf]`
+  with the given attenuation cap and a FRESH DfState, and returns `buf`'s region
+  shifted back by the deferred tail: the block's last 20 ms are emitted by the
+  *next* call, once DFN3's lookahead has real audio instead of pad zeros.
+- **`_delayed_dry(x)`** — the dry block delayed by the same tail, used by the
+  bypass path and for the dry copy kept for artifact analysis, so toggling DFN3
+  on/off never splices the timeline (verified sample-exact).
 - **`process(ctx)`** —
   - **bypass** (passthrough dry, skip the net) when backend is passthrough **or**
     `suppression ≤ bypass_below` (controller says clean) — saves CPU;
   - else maps `suppression → atten_lim_db ∈ [12, 100]` (gentle…aggressive), calls
-    `_enhance` on `[last 80 ms of real input | current block]` with a FRESH
-    DfState per call and keeps the block's region — every emitted frame gets
-    real left context and warmed (per-call) GRUs; DFN3's GRUs hold **no**
-    cross-call state. Output is **fully wet**. Writes `enh_wet` /
-    `enh_atten_db` meta.
+    `_enhance` on `[last 160 ms (+20 ms tail) of real input | current block]`
+    with a FRESH DfState per call — every emitted sample gets real left
+    context, warmed (per-call) GRUs and real right context; DFN3's GRUs hold
+    **no** cross-call state. Output is **fully wet**: the 4-cue artifact
+    rollback that blended dry back in is OFF by default since 2026-09-08
+    (measured net-negative on the benchmark and on real recordings; kept as
+    `artifact_rollback_enabled`). Writes `enh_wet` / `enh_atten_db` meta.
 - **`reset()`** — zeroes the raw-input history buffer (there is no persistent
   DfState to clear).
 
@@ -374,8 +400,18 @@ not verifiable in a headless environment — needs a real machine to validate li
   `pesq_wb` (needs `pesq`, resamples to 16 kHz), `stoi` (needs `pystoi`);
   `all_metrics(ref, est, sr)` returns whatever is available.
 - **`benchmark.py`**: `run_benchmark(pairs, sr, cfg)` → `BenchResult` (quality dict,
-  `rtf`, latency p50/p95/p99, peak RAM, backends) with `.report()`. `SUCCESS` defines
-  target criteria (SI-SDRi ≥ 10 dB, PESQ ≥ 2.6, RTF ≤ 0.5, latency ≤ 40 ms, RAM ≤ 300 MB).
+  `rtf`, latency p50/p95/p99, peak RAM, backends, alignment, valid-sample counts,
+  output hash) with `.report()`. Intrusive metrics are scored ONLY on the valid
+  reference/output overlap at the pipeline's known output delay
+  (`estimate_lag` cross-checks it and REJECTS impossible/ambiguous alignments;
+  `valid_overlap` crops both signals — no zero padding is ever scored); DNSMOS
+  is non-intrusive and uses the full output. `SUCCESS` names three separate
+  criteria that the report states individually and never conflates: the
+  **Phase-2 project objective** (SI-SDRi ≥ 4.0 dB @ 5 dB SNR — the only
+  release-gating quality criterion), the **aspirational Krisp-parity targets**
+  from the June redesign (SI-SDRi ≥ 10 dB, PESQ ≥ 2.6, DNSMOS OVRL ≥ 3.0,
+  RAM ≤ 300 MB — informational), and the **real-time budget** (RTF ≤ 0.5,
+  algorithmic latency ≤ 40 ms).
 
 ### `voiceiso/data/`
 - **`corpora.py`**: `Corpus.scan()` indexes audio files; `CorpusRegistry(data_root)`
@@ -505,19 +541,46 @@ passthrough until a model is provided.
 **Known caveats:**
 - Live mic path is wired but **unverified** here (no audio device) — validate on a real
   machine.
-- `algorithmic_latency_ms` (20 ms) reflects STFT framing only; **real
-  mouth-to-ear latency ≈ 200–300 ms** (100 ms blocks + worker-queue hop +
-  device I/O).
+- `algorithmic_latency_ms` (40 ms) = STFT framing + the 20 ms DFN3 lookahead
+  tail; **real mouth-to-ear latency ≈ 220–320 ms** (100 ms blocks +
+  worker-queue hop + device I/O).
 - DFN3 needs a **Rust toolchain** to build, a **torchaudio compat shim**
   (`voiceiso/_compat.py`), and pins **numpy < 2**.
-- SI-SDRi (~8 dB) is below the aspirational 10 dB target on the hardest white-noise
-  case; PESQ gain (+0.85) is solid.
+- Acceptance criteria, stated separately (2026-09-08, valid-overlap scoring,
+  `python -m voiceiso bench --n 20 --snr 5`, synthetic white noise): the
+  **Phase-2 project objective** SI-SDRi ≥ 4.0 dB is met at +4.05 dB (the
+  previous defaults measured +3.84 under the same scoring — below); the
+  **aspirational** Krisp-parity target of 10 dB is not met and never has been;
+  the **real-time budget** RTF ≤ 0.5 is met.  On real-noise corpora the
+  speech-regime SI-SDRi at 5 dB SNR ranges +3.8 (TV) … +8.8 dB (keyboard) —
+  the objective is met on five of six conditions, not on TV/loudspeaker
+  speech.  Synthetic and real-noise numbers are different conditions and are
+  never quoted against each other.
+- Extremely loud plate/crockery crashes and continuous clatter that OVERLAP
+  speech at ~0 dB local SNR are not removed (measured 0.2–0.3 dB cut on the
+  team's own recording); DFN3 treats the ringing, tonal impulses as
+  speech-like.  Hand-claps overlapping speech are cut ~12 dB; every impulse
+  in silence is cut 30–50 dB.  This is a remaining limitation of the frozen
+  architecture, not a tuning problem (a sub-frame limiter was built,
+  measured inert, and removed).
 
 **Implemented in V2:** (1) 100 ms worker-thread streaming with history-primed
 per-call DFN3 (the earlier "stateful 20 ms streaming" claim was wrong — DFN3's
 GRUs are invoked stateless; 20 ms blocks measure NEGATIVE SI-SDRi and were
 abandoned); (2) graduated suppression controller with per-class release times;
-(3) EWMA frame smoothing + flux-threshold bug fix in the noise classifier.
+(3) EWMA frame smoothing + flux-threshold bug fix in the noise classifier;
+(4) 2026-09-08, implemented and locally verified (not yet committed) — 160 ms
+priming + 20 ms deferred tail and artifact rollback disabled by default:
+clean-speech PESQ 3.55 → 3.96 through the full pipeline; standard +5 dB
+benchmark under identical valid-overlap scoring SI-SDRi +3.84 → +4.05, PESQ
+1.34 → 1.45, DNSMOS BAK 2.64 → 3.74, OVRL 2.08 → 2.76; bit-identical across
+three repeated runs. Also: intrusive metrics scored on the valid overlap at the
+known output delay (the zero-padded tail had cost 0.24 dB), `process_signal()`
+flushes the deferred tail (final 20 ms against documented fabricated context),
+`scripts/ground_truth_eval.py` for clean/noisy recording pairs, and
+`tests/test_deferred_tail.py`. Two personal recordings served as regression
+evidence (improved on all measured metrics except one flat SI-SDRi); they are
+not a representative evaluation set.
 
 **Remaining next steps:** (1) learned noise classifier (YAMNet / EfficientAT ONNX);
 (2) VoiceFilter-Lite target-speaker extraction; (3) export DFN to ONNX + INT8 to cut

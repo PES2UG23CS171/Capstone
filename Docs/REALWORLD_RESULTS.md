@@ -1,15 +1,15 @@
 # Real-world condition matrix
 
-Full deployed pipeline, 100 ms blocks, real FSD50K **eval** clips (n=4/condition, held out from all training). Silence regime: noise attenuation (dB, higher = better). Speech regime: SI-SDRi at the given input SNR (dB, higher = better).
+Full deployed pipeline, 100 ms blocks, real FSD50K **eval** clips (n=4/condition, held out from all training). Silence regime: noise attenuation (dB, higher = better). Speech regime: SI-SDRi at the given input SNR (dB, higher = better). All intrusive numbers are scored on the valid reference/output overlap only (pipeline output delay 975 samples; no zero padding is scored).
 
 | condition | silence: atten (dB) | speech @0 dB: SI-SDRi | speech @5 dB: SI-SDRi | speech @10 dB: SI-SDRi |
 |---|---|---|---|---|
-| fan | +38.0 | +8.3 | +6.2 | +3.7 |
-| AC (→fan) | +38.0 | +8.3 | +6.2 | +3.7 |
-| keyboard | +26.6 | +10.2 | +8.2 | +4.9 |
-| mouse (→clicks) | +26.6 | +10.2 | +8.2 | +4.9 |
-| clap | +44.8 | +7.2 | +5.0 | +2.5 |
-| TV (loudspeaker) | +19.0 | +4.1 | +3.0 | +1.3 |
-| competing speech | +23.2 | +6.3 | +4.7 | +2.2 |
-| café (babble) | +23.2 | +6.3 | +4.7 | +2.2 |
-| traffic | +38.3 | +5.8 | +4.3 | +2.0 |
+| fan | +41.9 | +10.4 | +8.5 | +5.5 |
+| AC (→fan) | +41.9 | +10.4 | +8.5 | +5.5 |
+| keyboard | +27.6 | +10.8 | +8.8 | +5.3 |
+| mouse (→clicks) | +27.6 | +10.8 | +8.8 | +5.3 |
+| clap | +42.7 | +7.3 | +5.6 | +3.5 |
+| TV (loudspeaker) | +13.7 | +5.1 | +3.8 | +2.0 |
+| competing speech | +31.4 | +7.5 | +5.9 | +3.5 |
+| café (babble) | +31.4 | +7.5 | +5.9 | +3.5 |
+| traffic | +41.5 | +6.9 | +4.9 | +2.5 |

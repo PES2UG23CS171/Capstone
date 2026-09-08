@@ -227,7 +227,18 @@ class StreamingPipeline:
             self._nan_streak = 0
         return ctx
 
-    def process_signal(self, x: np.ndarray, block: Optional[int] = None) -> np.ndarray:
+    @property
+    def output_delay_samples(self) -> int:
+        """Constant delay of the output timeline relative to the input, summed
+        over the stages that declare one: the enhancement stage's deferred
+        DFN3 tail (``dfn_tail_ms``, 960 samples by default) and the always-on
+        multi-band FIR group delay (15 samples).  The live paths simply carry
+        it (it is part of ``algorithmic_latency_ms``); the offline helper
+        :meth:`process_signal` removes it."""
+        return int(sum(int(getattr(st, "output_delay_samples", 0)) for st in self.stages))
+
+    def process_signal(self, x: np.ndarray, block: Optional[int] = None,
+                       flush: bool = True) -> np.ndarray:
         """Offline helper: stream a whole signal through in blocks.
 
         Default block size is 100 ms — the SAME operating point as the live
@@ -235,11 +246,47 @@ class StreamingPipeline:
         are representative of real-time behaviour.  (20 ms blocks give DFN3
         so little per-call context that SI-SDRi goes negative — never the
         default.)
+
+        With ``flush=True`` (default) the result is SAMPLE-ALIGNED with ``x``
+        and has exactly ``len(x)`` samples: the constant output delay
+        (:attr:`output_delay_samples`) is removed, and the samples the stages
+        were still holding at end-of-file are recovered by pushing zero blocks
+        through the (still stateful) chain until the delay has been flushed.
+        This is the same block-by-block processing the live paths run — no
+        splice, no reset, the stages' state carries straight into the flush —
+        so there is no discontinuity at the final block.  **Documented
+        caveat:** the last ``dfn_tail_ms`` of the file are thereby enhanced
+        against FABRICATED (zero) right context, which is exactly the
+        condition the deferred tail exists to avoid everywhere else; those
+        final 20 ms have the quality of the pre-tail design.  Live streams
+        never do this, and their timing is unchanged by this helper.
+        Signals shorter than one block, or shorter than the delay, are
+        handled (the flush loop runs until the delay is covered).
+
+        ``flush=False`` returns the raw delayed stream instead: the first
+        ``output_delay_samples`` samples are the stages' zero history and the
+        input's last ``output_delay_samples`` samples are not emitted.
         """
         block = block or int(round(self.cfg.sample_rate * 0.1))   # 100 ms
-        out = np.zeros(len(x), dtype=np.float32)
-        for s in range(0, len(x), block):
-            seg = x[s : s + block]
+        x = np.asarray(x, dtype=np.float32)
+        n = len(x)
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+        chunks = []
+        for s in range(0, n, block):
+            seg = x[s: s + block]
             ctx = self.process_block(seg)
-            out[s : s + len(seg)] = ctx.audio[: len(seg)]
-        return out
+            chunks.append(np.asarray(ctx.audio[: len(seg)], dtype=np.float32).copy())
+        y = np.concatenate(chunks)[:n]
+        d = self.output_delay_samples
+        if not flush or d <= 0:
+            return y
+        zeros = np.zeros(block, dtype=np.float32)
+        flushed = []
+        got = 0
+        while got < d:
+            z = np.asarray(self.process_block(zeros).audio[:block], dtype=np.float32).copy()
+            flushed.append(z)
+            got += len(z)
+        y = np.concatenate([y] + flushed)
+        return y[d: d + n]
