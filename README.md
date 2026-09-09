@@ -1,5 +1,7 @@
 # voiceiso — CPU-only real-time voice isolation
 
+[![CI](https://github.com/PES2UG23CS171/Capstone/actions/workflows/ci.yml/badge.svg)](https://github.com/PES2UG23CS171/Capstone/actions/workflows/ci.yml)
+
 A commercial-style voice-isolation pipeline (in the spirit of Krisp / Apple Voice
 Isolation) built around **DeepFilterNet3** on CPU, wrapped with preprocessing,
 AEC, Silero VAD, a **learned EfficientAT 12-class noise classifier**, a dynamic
