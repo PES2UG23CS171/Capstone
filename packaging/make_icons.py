@@ -1,5 +1,5 @@
-"""Regenerate the app logo files from packaging/logo_source.png: icon.icns, icon.ico
-and the window icon app/gui/logo.png (macOS only, needs iconutil).
+"""Regenerate the app logo files from the vector artwork packaging/logo.svg: icon.icns,
+icon.ico and the window icon app/gui/logo.png (macOS only, needs iconutil).
 
     PYTHONPATH=. QT_QPA_PLATFORM=offscreen .venv_poc/bin/python packaging/make_icons.py
 """
@@ -8,13 +8,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QBuffer, QIODevice, QPointF, QRect, QRectF, Qt
+from PyQt6.QtCore import QBuffer, QIODevice, QRectF, Qt
 from PyQt6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath
+from PyQt6.QtSvg import QSvgRenderer
 
 HERE = Path(__file__).resolve().parent
-ART = QImage(str(HERE / "logo_source.png"))
-FULL_PICTURE = QRect(20, 22, 810, 662)      # everything, minus the blank margin
-HEAD_ONLY = QRect(296, 104, 272, 272)       # the whole picture is unreadable when small
+ART = QSvgRenderer(str(HERE / "logo.svg"))
+FULL_PICTURE = QRectF(20, 22, 810, 662)     # everything, minus the blank margin
+HEAD_ONLY = QRectF(296, 104, 272, 272)      # the whole picture is unreadable when small
 HEAD_ONLY_BELOW = 128                       # pixels
 
 
@@ -32,11 +33,12 @@ def render(size: int) -> QImage:
     p.setClipPath(tile)
 
     small = size < HEAD_ONLY_BELOW
-    room = round((90 if small else 84) * u)
-    art = ART.copy(HEAD_ONLY if small else FULL_PICTURE).scaled(
-        room, room, Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation)
-    p.drawImage(QPointF((size - art.width()) / 2, (size - art.height()) / 2), art)
+    crop = HEAD_ONLY if small else FULL_PICTURE
+    room = (90 if small else 84) * u
+    scale = room / max(crop.width(), crop.height())
+    width, height = crop.width() * scale, crop.height() * scale
+    ART.setViewBox(crop)
+    ART.render(p, QRectF((size - width) / 2, (size - height) / 2, width, height))
     p.end()
     return img
 
@@ -89,5 +91,5 @@ if __name__ == "__main__":
     write_ico(HERE / "icon.ico")
     write_icns(HERE / "icon.icns")
     logo = HERE.parent / "app" / "gui" / "logo.png"
-    render(256).save(str(logo))
+    render(512).save(str(logo))
     print("wrote", HERE / "icon.ico", HERE / "icon.icns", "and", logo)
