@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QIcon
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -145,6 +147,8 @@ class ControlWindow(QMainWindow):
         self._mic_silent_since: Optional[float] = None
 
         self.setWindowTitle("VoiceISO")
+        # Title bar and taskbar on Windows; the Dock when running from source on Mac.
+        QApplication.setWindowIcon(QIcon(str(Path(__file__).with_name("logo.png"))))
         self.setMinimumWidth(440)
         self.setStyleSheet(_QSS)
 

@@ -51,6 +51,7 @@ HEAD = "efficientat_head12_v3.onnx"
 datas = [
     (str(ROOT / "checkpoints" / HEAD), "checkpoints"),
     (str(ROOT / "checkpoints" / f"{HEAD}.data"), "checkpoints"),
+    (str(ROOT / "app" / "gui" / "logo.png"), "app/gui"),
 ]
 
 # DFN3 weights, so that first launch needs no internet.  Only these two paths:

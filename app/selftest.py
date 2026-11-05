@@ -154,7 +154,10 @@ def _run_checks() -> Dict[str, Any]:
     qt_app.exec()
     tray.stop()
     report["gui"] = {"seconds_open": round(time.monotonic() - t0, 1),
-                     "tray_available": QSystemTrayIcon.isSystemTrayAvailable()}
+                     "tray_available": QSystemTrayIcon.isSystemTrayAvailable(),
+                     "logo_loaded": not qt_app.windowIcon().pixmap(64, 64).isNull()}
+    if not report["gui"]["logo_loaded"]:
+        failures.append("app logo did not load")
 
     report["failures"] = failures
     report["passed"] = not failures

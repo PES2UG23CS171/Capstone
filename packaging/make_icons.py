@@ -1,4 +1,5 @@
-"""Regenerate packaging/icon.icns and icon.ico (macOS only, needs iconutil).
+"""Regenerate the app logo files from packaging/logo_source.png: icon.icns, icon.ico
+and the window icon app/gui/logo.png (macOS only, needs iconutil).
 
     PYTHONPATH=. QT_QPA_PLATFORM=offscreen .venv_poc/bin/python packaging/make_icons.py
 """
@@ -7,34 +8,35 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import QBuffer, QIODevice, QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen
+from PyQt6.QtCore import QBuffer, QIODevice, QPointF, QRect, QRectF, Qt
+from PyQt6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath
 
 HERE = Path(__file__).resolve().parent
+ART = QImage(str(HERE / "logo_source.png"))
+FULL_PICTURE = QRect(20, 22, 810, 662)      # everything, minus the blank margin
+HEAD_ONLY = QRect(296, 104, 272, 272)       # the whole picture is unreadable when small
+HEAD_ONLY_BELOW = 128                       # pixels
 
 
 def render(size: int) -> QImage:
-    """The tray's microphone glyph on the app's dark rounded square."""
+    """The logo on a white rounded square (the artwork's own background is white)."""
     img = QImage(size, size, QImage.Format.Format_ARGB32)
     img.fill(Qt.GlobalColor.transparent)
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     u = size / 100.0
 
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#14161a"))
-    p.drawRoundedRect(QRectF(4 * u, 4 * u, 92 * u, 92 * u), 22 * u, 22 * u)
+    tile = QPainterPath()
+    tile.addRoundedRect(QRectF(4 * u, 4 * u, 92 * u, 92 * u), 22 * u, 22 * u)
+    p.fillPath(tile, QColor("white"))
+    p.setClipPath(tile)
 
-    green = QColor(34, 197, 94)
-    p.setBrush(green)
-    p.drawRoundedRect(QRectF(38 * u, 18 * u, 24 * u, 42 * u), 12 * u, 12 * u)
-    pen = QPen(green, 6 * u)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawArc(QRectF(28 * u, 30 * u, 44 * u, 40 * u), 180 * 16, 180 * 16)
-    p.drawLine(QPointF(50 * u, 70 * u), QPointF(50 * u, 82 * u))
-    p.drawLine(QPointF(36 * u, 82 * u), QPointF(64 * u, 82 * u))
+    small = size < HEAD_ONLY_BELOW
+    room = round((90 if small else 84) * u)
+    art = ART.copy(HEAD_ONLY if small else FULL_PICTURE).scaled(
+        room, room, Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation)
+    p.drawImage(QPointF((size - art.width()) / 2, (size - art.height()) / 2), art)
     p.end()
     return img
 
@@ -86,5 +88,6 @@ if __name__ == "__main__":
     app = QGuiApplication([])
     write_ico(HERE / "icon.ico")
     write_icns(HERE / "icon.icns")
-    render(512).save(str(Path(tempfile.gettempdir()) / "voiceiso_icon_preview.png"))
-    print("wrote", HERE / "icon.ico", "and", HERE / "icon.icns")
+    logo = HERE.parent / "app" / "gui" / "logo.png"
+    render(256).save(str(logo))
+    print("wrote", HERE / "icon.ico", HERE / "icon.icns", "and", logo)
