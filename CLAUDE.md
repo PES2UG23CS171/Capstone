@@ -202,7 +202,14 @@ platform must build its own, so Windows builds run only on GitHub Actions
 builds).
 
 - Check any packaged build with `VoiceISO --self-test --self-test-out r.json`.
-  `output_sha256` must match a source run with the same libraries.
+  `output_sha256` must match a source run with the same libraries **on the same
+  machine**. It can differ between machines: two GitHub Mac runners with identical
+  libraries and image gave different hashes and the same 48.6 dB noise reduction.
+- Windows builds must ship one Microsoft C++ runtime. PyInstaller collected 14.26
+  (PyQt6), 14.38 (Python) and 14.40 (a Java install on the runner's PATH); with those
+  the app installed fine but no model loaded ("DLL initialization routine failed",
+  0 dB reduction). `voiceiso.spec` replaces them all with the build machine's
+  System32 copies. Which old copy was at fault was not isolated.
 - Things that only break on a machine that isn't this one: `df` calls `git` at
   model load (no git → silent passthrough, patched in `voiceiso/_compat.py`); `df`
   writes a log into the model dir (`log_file=None`); windowed builds have
