@@ -45,6 +45,7 @@ librosa>=0.10        # feature extraction / resampling helpers
 # installs and runs normally. Keep the repo out of iCloud-synced paths.
 PyQt6==6.7.1
 PyQt6-Qt6==6.7.1
-pystray>=0.19
+# pystray (and its PyObjC / Pillow chain) removed 2026-10-01: it built the
+# macOS menu-bar item from a background thread, which macOS 27 kills with
+# SIGTRAP. The tray is now Qt's QSystemTrayIcon on the main thread.
 pyqtgraph>=0.13
-Pillow>=10.0

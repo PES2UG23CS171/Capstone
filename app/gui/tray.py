@@ -1,154 +1,122 @@
 """
-System-tray icon powered by **pystray**.
+System-tray (menu-bar) icon built on Qt's ``QSystemTrayIcon``.
 
-Runs in a background daemon thread so the PyQt6 event loop keeps the main
-thread (required on macOS).  Menu actions communicate back to the GUI via
-thread-safe Qt signals on an intermediary ``QObject`` bridge.
+Everything here runs on the Qt main thread.
+
+Why not pystray (the previous implementation): it ran ``pystray.Icon.run``
+on a background thread, and on macOS pystray creates and updates the
+``NSStatusItem`` from that thread.  AppKit never supported UI calls off the
+main thread; macOS 27 now enforces it — ``-[NSStatusItem setMenu:]`` reaches
+``-[BSServiceMainRunLoopQueue assertBarrierOnQueue]`` and the GUI process
+dies with SIGTRAP about 3 s after launch (reproduced with the tray alone on
+the real menu bar, exit 133).  ``QSystemTrayIcon`` does the same AppKit work
+on the main thread, needs no extra thread, and drops the pystray / PyObjC /
+Pillow dependency chain.
+
+The public interface is unchanged::
+
+    tray = TrayManager()                      # after QApplication exists
+    tray.bridge.show_window.connect(control_window.show)
+    tray.bridge.toggle_suppression.connect(on_toggle)
+    tray.bridge.quit_app.connect(app.quit)
+    tray.start()
 """
 
 from __future__ import annotations
 
-import sys
-import threading
 from typing import Optional
 
-from PIL import Image, ImageDraw
-
-from PyQt6.QtCore import QObject, pyqtSignal
-
-import pystray
-
-
-# ---------------------------------------------------------------------------
-#  Signal bridge (lives in the main/Qt thread, called from the tray thread)
-# ---------------------------------------------------------------------------
+from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
 
 
 class _TrayBridge(QObject):
-    """Thread-safe signal emitter used by the pystray menu callbacks."""
+    """Signals the tray emits towards the GUI."""
 
     show_window = pyqtSignal()
     toggle_suppression = pyqtSignal()
     quit_app = pyqtSignal()
 
 
-# ---------------------------------------------------------------------------
-#  Icon generation (no external image file required)
-# ---------------------------------------------------------------------------
+def _make_icon(size: int = 64, active: bool = True) -> QIcon:
+    """Draw the microphone glyph: green when *active*, red when bypassed.
 
-
-def _make_icon(size: int = 64, active: bool = True) -> Image.Image:
-    """Draw a simple mic icon as a PIL Image.
-
-    Green when *active*, red when bypassed.
+    Same geometry as the former PIL icon, drawn with QPainter (requires a
+    QGuiApplication, which ``TrayManager`` callers already have).
     """
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    colour = (34, 197, 94) if active else (239, 68, 68)  # green / red
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    colour = QColor(34, 197, 94) if active else QColor(239, 68, 68)
     pad = size // 6
 
-    # Microphone body (rounded rectangle approximation)
-    draw.ellipse(
-        [pad, pad // 2, size - pad, size // 2 + pad],
-        fill=colour,
-    )
-    draw.rectangle(
-        [pad, size // 4, size - pad, size // 2 + pad],
-        fill=colour,
-    )
-
-    # Stand
-    mid_x = size // 2
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Microphone head (ellipse + rectangle)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(colour)
+    p.drawEllipse(QRectF(pad, pad // 2, size - 2 * pad, size // 2 + pad - pad // 2))
+    p.drawRect(QRectF(pad, size // 4, size - 2 * pad, size // 2 + pad - size // 4))
+    # Stand and base
+    p.setPen(QPen(colour, max(2, size // 12)))
+    mid_x = size / 2
     stem_top = size // 2 + pad
     stem_bottom = size - pad
-    draw.line(
-        [(mid_x, stem_top), (mid_x, stem_bottom)],
-        fill=colour,
-        width=max(2, size // 12),
-    )
-    # Base
-    draw.line(
-        [(mid_x - pad, stem_bottom), (mid_x + pad, stem_bottom)],
-        fill=colour,
-        width=max(2, size // 12),
-    )
-
-    return img
-
-
-# ---------------------------------------------------------------------------
-#  TrayManager
-# ---------------------------------------------------------------------------
+    p.drawLine(QPointF(mid_x, stem_top), QPointF(mid_x, stem_bottom))
+    p.drawLine(QPointF(mid_x - pad, stem_bottom), QPointF(mid_x + pad, stem_bottom))
+    p.end()
+    return QIcon(pix)
 
 
 class TrayManager:
-    """Manages the pystray ``Icon`` on a background thread.
-
-    Usage::
-
-        tray = TrayManager()
-        tray.bridge.show_window.connect(control_window.show)
-        tray.bridge.toggle_suppression.connect(on_toggle)
-        tray.bridge.quit_app.connect(app.quit)
-        tray.start()
-    """
+    """Owns the ``QSystemTrayIcon``.  Main thread only."""
 
     def __init__(self) -> None:
         self.bridge = _TrayBridge()
-
         self._suppression_on = True
+        self._icon: Optional[QSystemTrayIcon] = None
 
-        menu = pystray.Menu(
-            pystray.MenuItem(
-                "Show / Hide",
-                self._on_show,
-                default=True,          # double-click action
-            ),
-            pystray.MenuItem(
-                lambda _: "Suppression: ON" if self._suppression_on else "Suppression: OFF",
-                self._on_toggle,
-            ),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._on_quit),
-        )
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return          # no tray on this desktop: the window is the whole UI
 
-        self._icon = pystray.Icon(
-            name="TransientFilter",
-            icon=_make_icon(active=True),
-            title="Transient Noise Suppressor",
-            menu=menu,
-        )
+        self._menu = QMenu()
+        act_show = QAction("Show / Hide", self._menu)
+        act_show.triggered.connect(self.bridge.show_window)
+        self._act_toggle = QAction("Suppression: ON", self._menu)
+        self._act_toggle.triggered.connect(self._on_toggle)
+        act_quit = QAction("Quit", self._menu)
+        act_quit.triggered.connect(self.bridge.quit_app)
+        self._menu.addAction(act_show)
+        self._menu.addAction(self._act_toggle)
+        self._menu.addSeparator()
+        self._menu.addAction(act_quit)
 
-        self._thread: Optional[threading.Thread] = None
+        self._icon = QSystemTrayIcon(_make_icon(active=True))
+        self._icon.setToolTip("Transient Noise Suppressor")
+        self._icon.setContextMenu(self._menu)
+        # Double-click opens the window (Windows/Linux; on macOS a click opens
+        # the menu, whose first item does the same).
+        self._icon.activated.connect(self._on_activated)
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Start the tray icon on a daemon thread."""
-        self._thread = threading.Thread(
-            target=self._icon.run,
-            daemon=True,
-            name="SysTray",
-        )
-        self._thread.start()
+        if self._icon is not None:
+            self._icon.show()
 
     def stop(self) -> None:
-        """Programmatically remove the tray icon."""
-        try:
-            self._icon.stop()
-        except Exception:
-            pass
+        if self._icon is not None:
+            self._icon.hide()
 
-    # ── menu callbacks (called on the tray thread) ───────────────────────
+    # ── callbacks (main thread) ──────────────────────────────────────────
 
-    def _on_show(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
-        self.bridge.show_window.emit()
+    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.bridge.show_window.emit()
 
-    def _on_toggle(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
+    def _on_toggle(self, *_: object) -> None:
         self._suppression_on = not self._suppression_on
-        self._icon.icon = _make_icon(active=self._suppression_on)
+        self._act_toggle.setText("Suppression: ON" if self._suppression_on else "Suppression: OFF")
+        if self._icon is not None:
+            self._icon.setIcon(_make_icon(active=self._suppression_on))
         self.bridge.toggle_suppression.emit()
-
-    def _on_quit(self, icon: pystray.Icon, item: pystray.MenuItem) -> None:
-        self.bridge.quit_app.emit()
