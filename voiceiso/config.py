@@ -287,6 +287,14 @@ class PipelineConfig:
                 setattr(self, k, float(v))
             else:
                 setattr(self, k, v.strip())
+        # Packaged builds ship the DFN3 weights next to the code so the first
+        # launch needs no download.  In a source checkout this directory does
+        # not exist and df uses its normal per-user model cache.
+        if self.dfn_model_dir is None:
+            from pathlib import Path
+            bundled = Path(__file__).resolve().parent.parent / "models" / "DeepFilterNet3"
+            if bundled.is_dir():
+                self.dfn_model_dir = str(bundled)
         # Auto-wire the shipped native-12 EfficientAT head when the caller did
         # not pin a path, resolving it relative to the repo root so it works no
         # matter what the current working directory is.  If the checkpoint is

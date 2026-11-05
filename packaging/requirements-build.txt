@@ -1,0 +1,20 @@
+# Exact versions for release builds, on Python 3.11.
+#
+# Why 3.11: deepfilterlib (DFN3's Rust core) publishes wheels for Windows and
+# Apple Silicon only up to Python 3.11, so this needs no Rust toolchain.
+#
+# Windows' default torch wheel from PyPI is already CPU-only.
+deepfilternet==0.5.6
+silero-vad==6.2.1
+onnxruntime==1.24.4
+numpy==1.26.4
+scipy==1.17.1
+soundfile==0.13.1
+sounddevice==0.5.5
+torch==2.11.0
+torchaudio==2.11.0
+# Do not bump PyQt6 without running scripts/gui_smoke.py: Qt 6.11's cocoa plugin
+# fails on macOS 26 (see requirements.txt).
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.1
+pyinstaller==6.22.3

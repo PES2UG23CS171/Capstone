@@ -2,6 +2,10 @@ __pycache__/
 *.pyc
 *.wav
 .venv_poc/
+
+# Packaging output (scripts in packaging/)
+/build/
+/dist/
 .DS_Store
 **/.DS_Store
 

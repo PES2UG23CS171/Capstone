@@ -29,4 +29,20 @@ def install_torchaudio_shim() -> None:
     sys.modules["torchaudio.backend.common"].AudioMetaData = AudioMetaData
 
 
+def disable_df_git_calls() -> None:
+    """Stop ``df.init_df`` from shelling out to ``git``.  Call after importing df.
+
+    Its logger runs ``git rev-parse`` just to print a commit hash, and only
+    catches ``CalledProcessError``.  On a machine without git that raises
+    ``FileNotFoundError``, ``init_df`` fails, and the whole product silently
+    drops to no-denoising passthrough (reproduced with git hidden from PATH).
+    On a Mac without developer tools, ``/usr/bin/git`` can pop up an Xcode
+    install dialog instead.
+    """
+    import df.logger
+
+    df.logger.get_commit_hash = lambda: None
+    df.logger.get_branch_name = lambda: None
+
+
 install_torchaudio_shim()

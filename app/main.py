@@ -10,7 +10,7 @@ Architecture
     │                                                                       │
     │  1. QApplication (event loop on main thread — required by macOS)      │
     │  2. ControlWindow (PyQt6 settings panel)                              │
-    │  3. TrayManager  (pystray icon on a daemon thread)                    │
+    │  3. TrayManager  (QSystemTrayIcon on the main thread)                 │
     │                                                                       │
     │  ── multiprocessing boundary ──────────────────────────────────────    │
     │                                                                       │
@@ -62,7 +62,8 @@ except Exception:
 # deepfilternet/onnxruntime and drop the whole pipeline to passthrough.  So we
 # explicitly carry the current venv's site-packages (and the repo root) into
 # PYTHONPATH before re-exec so every heavy import still resolves.
-if sys.platform == "darwin" and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable:
+if (sys.platform == "darwin" and not getattr(sys, "frozen", False)
+        and hasattr(sys, "_base_executable") and sys.executable != sys._base_executable):
     import sysconfig
 
     repo_root_path = str(Path(__file__).resolve().parent.parent)
@@ -84,6 +85,7 @@ project_root = str(Path(__file__).resolve().parent.parent)
 if sys.path[0] != project_root:
     sys.path.insert(0, project_root)
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from app.audio.engine import AudioEngineHandle
@@ -141,6 +143,15 @@ def main() -> None:
 
     # Show the control window on first launch
     window.show()
+
+    # macOS: closing the window only hides it, so clicking the Dock icon must
+    # bring it back (Mac users expect this, and otherwise the app looks dead).
+    if sys.platform == "darwin":
+        app.applicationStateChanged.connect(
+            lambda state: window.show()
+            if state == Qt.ApplicationState.ApplicationActive and not window.isVisible()
+            else None
+        )
 
     # ── Allow Ctrl-C from terminal ───────────────────────────────────────
     signal.signal(signal.SIGINT, lambda *_: _shutdown(app, engine, tray, window))

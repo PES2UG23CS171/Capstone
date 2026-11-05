@@ -9,7 +9,44 @@ suppression controller, speech preservation, and a residual post-filter.
 
 See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the full design and stage reference.
 
-## Quick start (clean clone)
+## Install the app
+
+Download the installer for your computer from the
+[Releases page](https://github.com/PES2UG23CS171/Capstone/releases). Python,
+the models, and everything else are included, and it works offline.
+
+| | Windows | Mac |
+|---|---|---|
+| **File** | `VoiceISO-…-Windows-x64-Setup.exe` | `VoiceISO-…-macOS-AppleSilicon.dmg` |
+| **Needs** | 64-bit Windows, no admin rights | Apple Silicon (M1 or newer) |
+| **First launch** | SmartScreen: *More info → Run anyway* | *System Settings → Privacy & Security → Open Anyway*, then allow the microphone |
+| **For calls, install once** | [VB-CABLE](https://vb-audio.com/Cable/), then pick **CABLE Output** as the mic in the call app | [BlackHole 2ch](https://existential.audio/blackhole/), then pick **BlackHole 2ch** as the mic in the call app (Chrome or Brave, not Safari) |
+
+To just hear it, plug in headphones and click **Rescan**. Speakers start muted so
+they can't feed back into the microphone. See
+[packaging/READ_ME_FIRST.txt](packaging/READ_ME_FIRST.txt) for the full steps.
+
+The security warnings appear because the app isn't signed with a paid Apple or
+Microsoft certificate. The virtual-mic driver is needed because operating systems
+don't let an ordinary app act as a microphone.
+
+### Building the installers
+
+Each platform has to build its own installer. The
+[Package workflow](.github/workflows/package.yml) does both on GitHub, self-tests
+the result, and publishes a Release when a `v*` tag is pushed. To build locally:
+
+```bash
+python3.11 -m venv buildenv && source buildenv/bin/activate
+pip install -r packaging/requirements-build.txt
+packaging/build_macos.sh          # on Windows: packaging\build_windows.ps1
+```
+
+The installed app can check itself on any machine, with no audio hardware needed:
+`VoiceISO --self-test --self-test-out report.json`. It confirms the real models
+loaded, noise is actually removed, and the window opens.
+
+## Quick start from source (clean clone)
 
 ```bash
 # 1. Rust toolchain — required to build DeepFilterNet's native extension
@@ -304,7 +341,9 @@ python -m tests.test_phase_a        # classifier / config wiring (5)
 python -m tests.test_robustness     # live containment, NaN immunity, reset independence (5)
 python -m tests.test_deferred_tail  # deferred-tail timeline + metric alignment (13; fake DFN3
                                     # backend — no weights needed; 1 optional real-DFN3 test)
-python -m tests.test_speech_guard   # speech cap wiring + speech-energy floor (6; fake backend)
+python -m tests.test_speech_guard   # speech cap wiring + speech-energy floor (8; fake backend)
+python -m tests.test_devices        # device choice + feedback guard (12; fake PortAudio, so
+                                    # Windows device lists are tested on any platform)
 ```
 
 Each runner is plain Python (prints PASS/SKIP/FAIL) and is also pytest-compatible.

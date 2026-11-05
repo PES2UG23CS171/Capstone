@@ -29,6 +29,8 @@ class CmdType(Enum):
     SET_OUTPUT_DEVICE = auto()    # Optional[int]
     SET_PASSTHROUGH = auto()      # bool — direct mic→headphones bypass
     GET_DEVICES = auto()          # request device list
+    REFRESH_DEVICES = auto()      # rescan hardware (headphones plugged in, driver installed)
+    ALLOW_SPEAKERS = auto()       # user accepts feedback risk: unmute loudspeaker output
     SHUTDOWN = auto()             # graceful stop
 
 
@@ -63,6 +65,8 @@ class DeviceInfo:
     default_samplerate: float
     is_default_input: bool = False
     is_default_output: bool = False
+    is_selected_input: bool = False   # the engine is using this as its mic
+    is_selected_output: bool = False  # the engine is using this as its output
 
 
 @dataclass
@@ -75,6 +79,7 @@ class StatusPayload:
     xruns: int = 0                    # cumulative buffer over/under-runs
     cpu_percent: float = 0.0          # rough engine CPU usage
     rtf: float = 0.0                  # real-time factor from RealTimeFilter
+    output_muted: bool = False        # feedback guard is holding a loudspeaker silent
 
 
 @dataclass

@@ -6,6 +6,8 @@ Layout (top to bottom):
     devices  : mic + output combos, with an automatic "Call mode" badge when
                the output is a virtual sink (BlackHole/Loopback/VB-Cable) —
                i.e. the far side of a Meet/Zoom call hears the clean stream
+               and a link to the free driver when no virtual cable is installed
+    guard    : banner while a loudspeaker output is muted to prevent feedback
     sliders  : strength (0–100 %), output gain (−12 … +6 dB; capped for
                open-speaker feedback safety)
     meters   : input / output level bars (dBFS)
@@ -18,6 +20,7 @@ this class never touches audio directly.
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import List, Optional
 
@@ -36,6 +39,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.audio.devices import DRIVER_URLS, call_app_mic_name, is_virtual_device
 from app.audio.engine import AudioEngineHandle
 from app.ipc.messages import (
     CmdType,
@@ -46,7 +50,10 @@ from app.ipc.messages import (
     StatusPayload,
 )
 
-_VIRTUAL_SINKS = ("blackhole", "loopback", "vb-cable", "soundflower")
+_MIC_PERMISSION_HINT = {
+    "darwin": "System Settings → Privacy & Security → Microphone",
+    "win32": "Settings → Privacy & security → Microphone",
+}
 
 _QSS = """
 QMainWindow, QWidget { background: #14161a; color: #e5e7eb;
@@ -59,6 +66,7 @@ QLabel[cls="value"]   { color: #d1d5db; }
 QLabel[cls="badge"]   { background: #123c2b; color: #34d399;
                         border: 1px solid #1d5c42; border-radius: 9px;
                         padding: 3px 10px; font-size: 11px; font-weight: 600; }
+QLabel[cls="warn"]    { color: #fbbf24; font-size: 12px; }
 
 QPushButton#toggle { background: #16a34a; color: white; border: none;
                      border-radius: 10px; font-size: 15px; font-weight: 700;
@@ -134,6 +142,7 @@ class ControlWindow(QMainWindow):
         self._error_until = 0.0
         self._engine_seen_alive = False
         self._saw_status = False
+        self._mic_silent_since: Optional[float] = None
 
         self.setWindowTitle("VoiceISO")
         self.setMinimumWidth(440)
@@ -181,7 +190,14 @@ class ControlWindow(QMainWindow):
         root.addWidget(self.btn_toggle)
 
         # Devices
-        root.addWidget(_section("Devices"))
+        dev_head = QHBoxLayout()
+        dev_head.addWidget(_section("Devices"))
+        dev_head.addStretch(1)
+        self.btn_rescan = QPushButton("↻  Rescan")
+        self.btn_rescan.setObjectName("ab")
+        self.btn_rescan.setToolTip("Plugged in headphones or installed a driver? Click to find it.")
+        dev_head.addWidget(self.btn_rescan)
+        root.addLayout(dev_head)
         dev = QGridLayout()
         dev.setHorizontalSpacing(10)
         dev.setVerticalSpacing(8)
@@ -194,10 +210,39 @@ class ControlWindow(QMainWindow):
         dev.setColumnStretch(1, 1)
         root.addLayout(dev)
 
-        self.lbl_callmode = QLabel("☎  Call mode — the far side hears the clean stream")
+        self.lbl_callmode = QLabel()
         self.lbl_callmode.setProperty("cls", "badge")
         self.lbl_callmode.setVisible(False)
         root.addWidget(self.lbl_callmode, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # Shown only when no virtual cable is installed.
+        self.lbl_driver = QLabel()
+        self.lbl_driver.setProperty("cls", "caption")
+        self.lbl_driver.setOpenExternalLinks(True)
+        self.lbl_driver.setWordWrap(True)
+        self.lbl_driver.setVisible(False)
+        driver = DRIVER_URLS.get(sys.platform)
+        if driver is not None:
+            self.lbl_driver.setText(
+                "Using Meet or Zoom? Install the free "
+                f'<a style="color:#60a5fa" href="{driver[1]}">{driver[0]}</a> '
+                "driver once, then click Rescan.")
+        root.addWidget(self.lbl_driver)
+
+        # Feedback guard
+        self.row_guard = QWidget()
+        guard = QHBoxLayout(self.row_guard)
+        guard.setContentsMargins(0, 0, 0, 0)
+        lbl_guard = QLabel("🔇  Output muted: these speakers could feed back into the "
+                           "mic. Use headphones and click Rescan, or:")
+        lbl_guard.setProperty("cls", "warn")
+        lbl_guard.setWordWrap(True)
+        guard.addWidget(lbl_guard, 1)
+        self.btn_unmute = QPushButton("Unmute")
+        self.btn_unmute.setObjectName("ab")
+        guard.addWidget(self.btn_unmute)
+        self.row_guard.setVisible(False)
+        root.addWidget(self.row_guard)
 
         # Sliders
         root.addWidget(_section("Processing"))
@@ -274,8 +319,21 @@ class ControlWindow(QMainWindow):
         self.slider_gain.valueChanged.connect(self._on_gain)
         self.combo_input.currentIndexChanged.connect(self._on_input_device)
         self.combo_output.currentIndexChanged.connect(self._on_output_device)
+        self.btn_rescan.clicked.connect(
+            lambda: self._engine.send(Command(CmdType.REFRESH_DEVICES)))
+        self.btn_unmute.clicked.connect(
+            lambda: self._engine.send(Command(CmdType.ALLOW_SPEAKERS)))
 
     # ── Slots ────────────────────────────────────────────────────────────
+
+    def _update_callmode_badge(self) -> None:
+        name = self.combo_output.currentText()
+        is_call_mode = is_virtual_device(name)
+        if is_call_mode:
+            self.lbl_callmode.setText(
+                f"☎  Call mode — in Meet/Zoom, choose “{call_app_mic_name(name)}” "
+                "as the mic. You won't hear yourself here.")
+        self.lbl_callmode.setVisible(is_call_mode)
 
     def _on_toggle(self, checked: bool) -> None:
         self.btn_toggle.setText(f"Suppression  {'ON' if checked else 'OFF'}")
@@ -309,8 +367,7 @@ class ControlWindow(QMainWindow):
         dev_idx = self.combo_output.itemData(index)
         if dev_idx is not None:
             self._engine.send(Command(CmdType.SET_OUTPUT_DEVICE, dev_idx))
-        name = self.combo_output.itemText(index).lower()
-        self.lbl_callmode.setVisible(any(m in name for m in _VIRTUAL_SINKS))
+        self._update_callmode_badge()
 
     # ── Engine event polling ─────────────────────────────────────────────
 
@@ -349,6 +406,7 @@ class ControlWindow(QMainWindow):
 
         self.lbl_in_db.setText(_fmt(s.input_level_db))
         self.lbl_out_db.setText(_fmt(s.output_level_db))
+        self.row_guard.setVisible(s.output_muted)
 
         self.lbl_state.setText("●  running")
         self.lbl_state.setStyleSheet("color: #22c55e; font-weight: 600;")
@@ -360,6 +418,19 @@ class ControlWindow(QMainWindow):
 
         if time.monotonic() < self._error_until:
             return                     # keep the pinned error visible
+
+        # A real mic always has some noise.  Exact digital silence for seconds
+        # means the OS is withholding it, usually a denied permission.
+        now = time.monotonic()
+        if s.input_level_db > -119.0:
+            self._mic_silent_since = None
+        elif self._mic_silent_since is None:
+            self._mic_silent_since = now
+        elif now - self._mic_silent_since > 5.0:
+            where = _MIC_PERMISSION_HINT.get(sys.platform, "your system settings")
+            self.statusBar().showMessage(f"⚠  No mic signal. Allow access in {where}.")
+            return
+
         xr = f"  |  x-runs: {s.xruns}" if s.xruns else ""
         self.statusBar().showMessage(f"Engine running{xr}")
 
@@ -371,25 +442,28 @@ class ControlWindow(QMainWindow):
         self.combo_input.addItem("System Default", None)
         self.combo_output.addItem("System Default", None)
 
-        default_in_idx = 0
-        default_out_idx = 0
+        # Show what the engine is actually using (signals are blocked, so this
+        # does not send a switch command back).
+        current_in = 0
+        current_out = 0
+        has_cable = False
         for d in devices:
             if d.max_input_channels > 0:
                 self.combo_input.addItem(d.name, d.index)
-                if d.is_default_input:
-                    default_in_idx = self.combo_input.count() - 1
+                if d.is_selected_input:
+                    current_in = self.combo_input.count() - 1
             if d.max_output_channels > 0:
                 self.combo_output.addItem(d.name, d.index)
-                if d.is_default_output:
-                    default_out_idx = self.combo_output.count() - 1
+                has_cable = has_cable or is_virtual_device(d.name)
+                if d.is_selected_output:
+                    current_out = self.combo_output.count() - 1
 
-        self.combo_input.setCurrentIndex(default_in_idx)
-        self.combo_output.setCurrentIndex(default_out_idx)
+        self.combo_input.setCurrentIndex(current_in)
+        self.combo_output.setCurrentIndex(current_out)
         self.combo_input.blockSignals(False)
         self.combo_output.blockSignals(False)
-        # Reflect the (restored) output selection in the call-mode badge.
-        name = self.combo_output.currentText().lower()
-        self.lbl_callmode.setVisible(any(m in name for m in _VIRTUAL_SINKS))
+        self._update_callmode_badge()
+        self.lbl_driver.setVisible(not has_cable and bool(self.lbl_driver.text()))
 
     # ── Window behaviour ─────────────────────────────────────────────────
 

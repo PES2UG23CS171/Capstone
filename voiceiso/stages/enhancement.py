@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 try:
     import torch
     from df.enhance import init_df, enhance
+    voiceiso._compat.disable_df_git_calls()
     _HAS_DF = True
     _DF_IMPORT_ERROR = None
 except Exception as _exc:  # pragma: no cover
@@ -221,8 +222,12 @@ class Enhancement(Stage):
         if _HAS_DF:
             torch.set_num_threads(threads)
             try:
+                # log_file=None: df would otherwise write enhance.log into the
+                # model directory, which is read-only inside an installed app
+                # (and writing there would invalidate a macOS code signature).
                 self._model, state0, _ = init_df(
-                    model_base_dir=cfg.dfn_model_dir, config_allow_defaults=True
+                    model_base_dir=cfg.dfn_model_dir, config_allow_defaults=True,
+                    log_file=None,
                 )
             except Exception as exc:  # noqa: BLE001 — bad model dir / failed
                 # download must not kill the whole pipeline with a raw

@@ -29,14 +29,14 @@ import sys
 import threading
 import time
 import traceback
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, parent_process
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import sounddevice as sd
 
-from app.audio.devices import query_devices
+from app.audio.devices import looks_like_loudspeaker, pick_devices, query_devices
 from app.config import AppConfig
 from app.inference.stub import StubDenoiser
 from app.ipc.messages import (
@@ -89,6 +89,9 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
     cfg : AppConfig
         Initial configuration snapshot.
     """
+    # Handle to the GUI process, captured first thing so a GUI that dies while
+    # the models are still loading is detected too (see the command loop).
+    _parent = parent_process()
     logging.basicConfig(
         level=logging.DEBUG,
         format="[ENGINE %(levelname)s] %(message)s",
@@ -106,6 +109,16 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
 
     input_dev: Optional[int] = cfg.input_device
     output_dev: Optional[int] = cfg.output_device
+    # Names of devices the user explicitly chose; a rescan keeps these and
+    # re-picks everything else (so plugged-in headphones take over).
+    chosen_input: Optional[str] = None
+    chosen_output: Optional[str] = None
+
+    # Feedback guard: mic → laptop speakers → mic howls, and a fresh install
+    # opens exactly that path on its first launch.  Loudspeaker outputs stay
+    # silent until the user confirms in the GUI.
+    speakers_allowed: bool = False
+    output_muted: bool = False
 
     xruns: int = 0
     last_status_time: float = 0.0
@@ -269,6 +282,8 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                 outdata[:] = indata[:, :out_ch]
             peak_out = peak_in
             current_rtf = 0.0
+            if output_muted:
+                outdata.fill(0.0)
             return
 
         if enabled and pipeline is not None:
@@ -317,17 +332,31 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
             # Mono→stereo: duplicate
             processed = np.tile(processed, (1, out_ch))
         outdata[:] = processed[:, :out_ch]
+        if output_muted:
+            outdata.fill(0.0)       # levels above still show the app is working
 
     # ── Build and start the stream ───────────────────────────────────────
 
     stream: Optional[sd.Stream] = None
 
+    if input_dev is None or output_dev is None:
+        try:
+            picked_in, picked_out = pick_devices(query_devices())
+            input_dev = input_dev if input_dev is not None else picked_in
+            output_dev = output_dev if output_dev is not None else picked_out
+        except Exception:
+            log.error("Device selection failed, using system defaults:\n%s",
+                      traceback.format_exc())
+
     def _open_stream() -> sd.Stream:
+        nonlocal output_muted
         # Up to 2 output channels (clamped to device capability): mono into a
         # stereo device (speakers, BlackHole virtual mic) would otherwise
         # leave one channel silent; the callback duplicates mono into both.
         out_info = sd.query_devices(output_dev, "output")
         out_ch = max(1, min(2, int(out_info["max_output_channels"])))
+        # Decide BEFORE the stream starts so no audio slips out.
+        output_muted = looks_like_loudspeaker(out_info["name"]) and not speakers_allowed
         s = sd.Stream(
             samplerate=cfg.sample_rate,
             blocksize=cfg.block_size,
@@ -347,16 +376,45 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
         )
         return s
 
+    def _close_stream() -> None:
+        # Clear the reference even if closing raises, so one failed device
+        # switch cannot make every later switch fail on the dead stream.
+        nonlocal stream
+        s, stream = stream, None
+        if s is not None:
+            s.stop()
+            s.close()
+
+    def _reopen_stream() -> None:
+        nonlocal stream
+        _close_stream()
+        _flush(_proc_in); _flush(_proc_out)
+        stream = _open_stream()
+
+    def _device_name(index: Optional[int]) -> Optional[str]:
+        return sd.query_devices(index)["name"] if index is not None else None
+
     try:
         stream = _open_stream()
-    except Exception:
+    except Exception as exc:
         log.error("Failed to open initial stream:\n%s", traceback.format_exc())
-        evt_q.put(Event(EvtType.ERROR, "Failed to open audio stream."))
+        evt_q.put(Event(EvtType.ERROR, f"Could not open the audio devices: {exc}"))
 
     # ── Main command loop ────────────────────────────────────────────────
 
     running = True
     while running:
+        # --- parent-death watchdog ---------------------------------------
+        # This process is a daemon child, but daemon children are reaped
+        # only when the GUI exits NORMALLY.  When the GUI crashed or was
+        # force-quit, the engine kept running as an invisible orphan with
+        # the mic and output open and DFN3 burning ~38 % CPU (three were
+        # found after three crashed launches).  is_alive() polls the
+        # parent's sentinel pipe — cheap enough for every loop pass.
+        if _parent is not None and not _parent.is_alive():
+            log.warning("GUI process exited without a shutdown command — stopping engine.")
+            break
+
         # --- process pending commands (non-blocking) ---------------------
         try:
             cmd: Command = cmd_q.get(timeout=cfg.status_interval)
@@ -395,21 +453,33 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
 
                 elif cmd.kind == CmdType.SET_INPUT_DEVICE:
                     input_dev = cmd.value
+                    chosen_input = _device_name(input_dev)
                     log.info("Switching input device → %s", input_dev)
-                    if stream is not None:
-                        stream.stop()
-                        stream.close()
-                    _flush(_proc_in); _flush(_proc_out)
-                    stream = _open_stream()
+                    _reopen_stream()
 
                 elif cmd.kind == CmdType.SET_OUTPUT_DEVICE:
                     output_dev = cmd.value
+                    chosen_output = _device_name(output_dev)
                     log.info("Switching output device → %s", output_dev)
-                    if stream is not None:
-                        stream.stop()
-                        stream.close()
-                    _flush(_proc_in); _flush(_proc_out)
-                    stream = _open_stream()
+                    _reopen_stream()
+
+                elif cmd.kind == CmdType.REFRESH_DEVICES:
+                    # PortAudio only enumerates hardware when it initialises,
+                    # so new headphones or a new driver need a re-init.
+                    log.info("Rescanning audio devices.")
+                    _close_stream()
+                    sd._terminate()
+                    sd._initialize()
+                    input_dev, output_dev = pick_devices(
+                        query_devices(), chosen_input, chosen_output)
+                    _reopen_stream()
+                    evt_q.put(Event(EvtType.DEVICE_LIST,
+                                    query_devices(input_dev, output_dev)))
+
+                elif cmd.kind == CmdType.ALLOW_SPEAKERS:
+                    speakers_allowed = True
+                    output_muted = False
+                    log.info("User unmuted loudspeaker output.")
 
                 elif cmd.kind == CmdType.SET_PASSTHROUGH:
                     _flush(_proc_in); _flush(_proc_out)
@@ -418,8 +488,8 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                     log.info("Passthrough mode = %s", passthrough)
 
                 elif cmd.kind == CmdType.GET_DEVICES:
-                    devices = query_devices()
-                    evt_q.put(Event(EvtType.DEVICE_LIST, devices))
+                    evt_q.put(Event(EvtType.DEVICE_LIST,
+                                    query_devices(input_dev, output_dev)))
 
             except Exception:
                 msg = traceback.format_exc()
@@ -439,15 +509,14 @@ def run_engine(cmd_q: Queue, evt_q: Queue, cfg: AppConfig) -> None:  # noqa: C90
                         output_level_db=_db(peak_out),
                         xruns=xruns,
                         rtf=current_rtf,
+                        output_muted=output_muted,
                     ),
                 )
             )
 
     # ── Cleanup ──────────────────────────────────────────────────────────
-    if stream is not None:
-        stream.stop()
-        stream.close()
-        log.info("Stream closed.")
+    _close_stream()
+    log.info("Stream closed.")
 
     # Stop the DSP worker thread.
     _worker_alive.clear()

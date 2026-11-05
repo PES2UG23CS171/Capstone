@@ -34,6 +34,9 @@ jobs:
       - name: Unit tests — speech protection (fake backend)
         run: python -m tests.test_speech_guard
 
+      - name: Device choice + feedback guard (fake PortAudio)
+        run: python -m tests.test_devices
+
       - name: Classifier / config wiring
         run: python -m tests.test_phase_a
 
