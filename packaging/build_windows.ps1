@@ -10,6 +10,9 @@ function Invoke-SelfTest([string]$Exe, [string]$Report) {
     $p = Start-Process -FilePath $Exe -ArgumentList "--self-test", "--self-test-out", "`"$Report`"" `
         -Wait -PassThru -RedirectStandardOutput "$Report.stdout" -RedirectStandardError "$Report.stderr"
     if (Test-Path $Report) { Get-Content $Report } else { Get-Content "$Report.stdout", "$Report.stderr" }
+    # The audio child logs to the user's app-data folder.  Keep it beside the report.
+    $Log = "$env:LOCALAPPDATA\VoiceISO\voiceiso.log"
+    if (Test-Path $Log) { Copy-Item $Log "$Report.log" }
     if ($p.ExitCode -ne 0) { throw "Self-test failed for $Exe (exit $($p.ExitCode))" }
 }
 
@@ -20,9 +23,11 @@ New-Item -ItemType Directory -Force -Path build, dist | Out-Null
 python -m PyInstaller --noconfirm --clean packaging\voiceiso.spec --distpath build\dist --workpath build\work
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
-Write-Host "--- Microsoft C++ runtime must ship with the app (clean PCs may not have it)"
+Write-Host "--- Microsoft C++ runtime: must ship (clean PCs may lack it), and only once (see voiceiso.spec)"
 foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") {
-    if (-not (Get-ChildItem build\dist\VoiceISO -Recurse -Filter $dll)) { throw "$dll is not bundled" }
+    $Copies = @(Get-ChildItem build\dist\VoiceISO -Recurse -Filter $dll)
+    $Copies | ForEach-Object { Write-Host "$($_.FullName)  $($_.VersionInfo.FileVersion)" }
+    if ($Copies.Count -ne 1) { throw "$dll must ship exactly once, found $($Copies.Count)" }
 }
 
 Write-Host "--- self-test of the built app"

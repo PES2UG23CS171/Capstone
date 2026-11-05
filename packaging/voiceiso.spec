@@ -9,6 +9,42 @@ from PyInstaller.utils.hooks import collect_data_files
 ROOT = Path(SPECPATH).parent
 VERSION = (ROOT / "packaging" / "VERSION").read_text().strip()
 
+
+def single_windows_runtime(binaries):
+    """Ship one copy of the Microsoft C++ runtime: the build machine's own.
+
+    PyQt6 and others carry older private copies of msvcp140.dll and friends.
+    Windows finds these DLLs by name, so an old copy breaks every library built
+    with a newer compiler: onnxruntime and torch stop with "DLL initialization
+    routine failed" and the app silently stops denoising.  The runtime is
+    backward compatible, so Qt runs fine on the newer one.
+    """
+    import os
+    import re
+
+    def version(path):
+        try:
+            from PyInstaller.utils.win32.versioninfo import read_version_info_from_executable
+            ffi = read_version_info_from_executable(str(path)).ffi
+            return f"{ffi.fileVersionMS >> 16}.{ffi.fileVersionMS & 0xffff}.{ffi.fileVersionLS >> 16}"
+        except Exception:
+            return "unknown version"
+
+    pattern = re.compile(r"(msvcp140(_\w+)?|vcruntime140(_\w+)?|concrt140|vcomp140)\.dll", re.I)
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    kept, names = [], set()
+    for entry in binaries:
+        name = Path(entry[0]).name.lower()
+        if pattern.fullmatch(name):
+            names.add(name)
+            print(f"C++ runtime: dropping {entry[0]} ({version(entry[1])}) from {entry[1]}")
+        else:
+            kept.append(entry)
+    for name in sorted(names):
+        print(f"C++ runtime: using {system32 / name} ({version(system32 / name)})")
+    return kept + [(name, str(system32 / name), "BINARY") for name in sorted(names)]
+
+
 # The deployed classifier only.  Other heads in checkpoints/ are research
 # artifacts (v4 stays available to source checkouts via VOICEISO_HEAD).
 HEAD = "efficientat_head12_v3.onnx"
@@ -46,6 +82,8 @@ a = Analysis(
     ],
     noarchive=False,
 )
+if sys.platform == "win32":
+    a.binaries = single_windows_runtime(a.binaries)
 pyz = PYZ(a.pure)
 
 is_mac = sys.platform == "darwin"

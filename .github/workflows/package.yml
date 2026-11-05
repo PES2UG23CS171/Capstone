@@ -50,9 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-reports
-          path: |
-            build/selftest-*
-            ~/AppData/Local/VoiceISO/voiceiso.log
+          path: build/selftest-*    # build_windows.ps1 copies the app's log here
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:

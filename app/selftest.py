@@ -41,6 +41,13 @@ def _rms_db(x) -> float:
     return float(20 * np.log10(np.sqrt(np.mean(np.asarray(x, np.float64) ** 2)) + 1e-12))
 
 
+def _load_errors() -> Dict[str, str]:
+    """Why a backend fell back.  A windowed build has no console to show this on."""
+    from voiceiso.stages import enhancement, vad
+    errors = {"enhancement": enhancement._DF_IMPORT_ERROR, "vad": vad._SILERO_IMPORT_ERROR}
+    return {stage: reason for stage, reason in errors.items() if reason}
+
+
 def _audio_check(result_q) -> None:
     """Runs in a spawned child, the same way the live audio engine does."""
     try:
@@ -75,6 +82,7 @@ def _audio_check(result_q) -> None:
         import sounddevice as sd      # must load the bundled PortAudio
         result_q.put({
             "backends": pipe.backend_summary,
+            "load_errors": _load_errors(),
             "noise_reduction_db": round(reduction, 1),
             "output_finite": bool(np.all(np.isfinite(out))),
             "output_sha256": hashlib.sha256(out.tobytes()).hexdigest()[:16],

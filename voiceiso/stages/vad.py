@@ -40,8 +40,10 @@ try:
     import torch
     from silero_vad import load_silero_vad
     _HAS_SILERO = True
-except Exception:  # pragma: no cover
+    _SILERO_IMPORT_ERROR = None
+except Exception as _exc:  # pragma: no cover
     _HAS_SILERO = False
+    _SILERO_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 
 def _resample_poly(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
