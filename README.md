@@ -11,14 +11,16 @@ See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) for the full design and stage r
 
 ## Install the app
 
-Download the installer for your computer from the
-[Releases page](https://github.com/PES2UG23CS171/Capstone/releases). Python,
-the models, and everything else are included, and it works offline.
+**[Download for Windows](https://github.com/PES2UG23CS171/Capstone/actions/runs/42111864373/artifacts/13455452155)** (204 MB) · **[Download for Mac](https://github.com/PES2UG23CS171/Capstone/actions/runs/42111864373/artifacts/13455177934)** (227 MB)
+
+You need to be signed in to GitHub to use these links, and they stop working on
+3 February 2027. Each one downloads a zip with the installer inside. Python, the
+models, and everything else are included, and it works offline.
 
 | | Windows | Mac |
 |---|---|---|
 | **File** | `VoiceISO-…-Windows-x64-Setup.exe` | `VoiceISO-…-macOS-AppleSilicon.dmg` |
-| **Needs** | 64-bit Windows, no admin rights | Apple Silicon (M1 or newer) |
+| **Needs** | 64-bit Windows, no admin rights | Apple Silicon (M1 or newer), macOS 14 or later |
 | **First launch** | SmartScreen: *More info → Run anyway* | *System Settings → Privacy & Security → Open Anyway*, then allow the microphone |
 | **For calls, install once** | [VB-CABLE](https://vb-audio.com/Cable/), then pick **CABLE Output** as the mic in the call app | [BlackHole 2ch](https://existential.audio/blackhole/), then pick **BlackHole 2ch** as the mic in the call app (Chrome or Brave, not Safari) |
 
